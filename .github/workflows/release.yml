@@ -55,10 +55,11 @@ jobs:
       - name: Checksums
         run: |
           set -euo pipefail
-          cd dist
-          ls -la
-          sha256sum *.exe *.exe.sha256 goose-doc-* 2>/dev/null | grep -v '\.sha256$' > SHA256SUMS || true
-          cat SHA256SUMS
+          ls -la dist
+          # build-app.yml writes a "<asset>.sha256" next to each asset, so the
+          # release-level manifest is just those lines combined.
+          cat dist/./*.sha256 > dist/SHA256SUMS
+          cat dist/SHA256SUMS
 
       - name: Publish release
         env:

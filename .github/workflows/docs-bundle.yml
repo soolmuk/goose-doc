@@ -113,16 +113,16 @@ jobs:
               "" \
               "| field | value |" \
               "|---|---|" \
-              '| docs root | `goose-docs-map.md` + `docs/**` |' \
+              "| docs root | \`goose-docs-map.md\` + \`docs/**\` |" \
               "| doc entries | $ENTRIES |" \
               "| size | $SIZE_MB MB |" \
               "| sha256 | \`$SHA\` |" \
               "" \
               "Point goose at it once it is served:" \
               "" \
-              '```' \
+              "\`\`\`" \
               "GOOSE_DOCS_ROOT=http://<host>:<port>" \
-              '```' \
+              "\`\`\`" \
               "" \
               "Documentation content is Apache-2.0, from" \
               "https://github.com/aaif-goose/goose (\`$TAG\`)." \

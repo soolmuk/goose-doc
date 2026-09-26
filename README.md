@@ -21,7 +21,7 @@ GOOSE_DOCS_ROOT=http://docs.internal:10650
 | **P1** | Docs bundle pipeline (`tools/`, `docs-bundle.yml`) | **done** |
 | **P2** | **Headless server, docs resolution, tests** | **done** |
 | **P3** | **egui panel, settings persistence** | **done** |
-| P4 | Cross-OS build and smoke tests | planned |
+| **P4** | **Cross-OS build and smoke tests** | **done (CI run pending)** |
 | P5 | Release assets, service install | planned |
 
 See [PLAN.md](PLAN.md) for the full plan.

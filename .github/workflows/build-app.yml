@@ -40,8 +40,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
 
+      # Pinned to the toolchain in rust-toolchain.toml so CI and local builds
+      # agree. dtolnay/rust-toolchain publishes versions as tags, not branches.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.1
         with:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy

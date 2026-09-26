@@ -456,41 +456,42 @@ concurrency:
 - **멱등성:** `tag: docs-v<goose_version>`이 이미 릴리즈 자산으로 존재하면 publish를 건너뛴다. 1일 6회 실행되어도 중복 업로드/중복 릴리즈를 만들지 않는다.
 - 번들은 **플랫폼 독립적**이므로 Linux에서 1회만 생성하고 3개 OS가 같은 자산을 쓴다(중복 제거 = CI 최소화).
 
-### 워크플로 B — `build-app.yml` (재사용 + 수동)
+### 워크플로 B — `build-app.yml` (P4 구현 완료)
 
-```
-matrix:
-  - windows-latest  → x86_64-pc-windows-msvc
-  - ubuntu-latest   → x86_64-unknown-linux-gnu
-  - macos-14        → aarch64-apple-darwin   # P0 확정: aarch64만 (Intel은 범위 제외)
+```yaml
+on:
+  workflow_dispatch:
+  workflow_call:            # release.yml이 재사용
+    inputs:
+      upload_artifacts: { default: true, type: boolean }
+permissions: { contents: read }
+strategy:
+  fail-fast: false
+  matrix:
+    include:
+      - { name: linux-x86_64,   os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
+      - { name: macos-arm64,    os: macos-14,       target: aarch64-apple-darwin }
+      - { name: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
 steps:
-  # Linux만: egui 빌드에 필요한 시스템 패키지 (eframe README 기준)
-  - if: runner.os == 'Linux'
-    run: sudo apt-get update && sudo apt-get install -y
-         libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
-  - checkout → rust toolchain(pin) → cargo fmt --check → cargo clippy --all-targets -- -D warnings
-  - cargo build --release → cargo test
-  - tools/smoke-test.sh (헤드리스, 3 OS 공통) — P2에서 구현 완료
-      · ./goose-doc --headless --docs-dir fixtures/docs-root --port 0  (기본 = 모든 인터페이스)
-      · 로그에서 "Serving goose docs at http://ADDR" 파싱, ADDR이 wildcard가 아님을 검증
-      · GET /healthz == 200
-      · GET /goose-docs-map.md == 200, content-type text/plain
-      · GET /docs/guides/offline-docs.md == 200, 본문에 "docs root" 포함
-      · GET /docs/guides/does-not-exist.md == 404, HTML 셸 아님
-      · 맵의 모든 항목이 200
-      · /../Cargo.toml, /docs/../../Cargo.toml 거부(403/404)
-      · SIGTERM으로 정상 종료
-  # Linux만: 창 생성까지 확인 (xvfb 가상 디스플레이) — P3에서 추가
-  - if: runner.os == 'Linux'
-    run: xvfb-run -a ./goose-doc --smoke-gui
-      · 창 생성 → 1회 렌더 프레임 → 자동 종료(exit 0). egui 회귀 검출용
+  checkout
+  dtolnay/rust-toolchain@1.96.1 (targets + rustfmt + clippy)   # rust-toolchain.toml과 동일
+  Swatinem/rust-cache@v2 (key: target)
+  [Linux만] apt: libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+  cargo fmt --check
+  cargo clippy --all-targets -- -D warnings
+  cargo build --release --target <target>
+  cargo test  --target <target>
+  tools/smoke-test.sh target/<target>/release/goose-doc     # 실제 바이너리 실행 검증
+  [Linux만] 디스플레이 없이 패널 실행 → "Serving goose docs at" + 패널 안내 확인
+  패키징: dist/goose-doc-<name>[.exe] + .sha256
+  actions/upload-artifact@v7.0.1
 ```
 
-- **각 OS에서 실제로 실행해 검증**하는 것이 요구사항 2의 핵심이다. P2에서 `tools/smoke-test.sh`로 구현했고, 이 스크립트는 **외부 의존 없이** `curl`과 프로세스 제어만 쓴다(Windows 러너는 Git Bash 사용).
-- 서버 제어는 HTTP 관리 API가 아니라 **프로세스 신호**를 쓴다(§5.4 P2 결정). 스크립트는 로그에서 실제 포트를 파싱하므로 `--port 0`과 임의 포트를 그대로 검증한다.
-- 크로스 컴파일 없음 → GitHub hosted runner에서 네이티브 빌드.
-- **macOS는 `aarch64`만 낸다(P0 결정, 권장안).** goose 릴리즈가 `aarch64-apple-darwin`과 `x86_64-apple-darwin`을 모두 제공하고 `macos-14` 러너에서 `x86_64`도 빌드 가능하지만, Intel Mac 자산은 **CI 시간·자산 수만 늘리고 요구사항(서버 호스팅)에 기여하지 않으므로** 제외한다. 필요해지면 `rustup target add x86_64-apple-darwin` 한 줄로 추가한다(§10.1 이력 참고).
-- Linux 창 검증은 `xvfb` 1줄로 해결한다(별도 워크플로/잡 추가 없음). `--smoke-gui`는 테스트 전용 플래그로, 첫 프레임 렌더 후 즉시 종료한다.
+- **크로스 컴파일 없음** → 각 러너에서 네이티브 빌드. 실패가 진짜 플랫폼 실패가 된다.
+- `fail-fast: false`로 3개 플랫폼 결과를 모두 확인한다.
+- 스모크 테스트는 `tools/smoke-test.sh`이며 **Git Bash(Windows)에서도 동작**하도록 작성했다: `curl.exe` 폴백, `seq` 미사용, `sha256sum`/`shasum` 양쪽 지원, `disown`으로 종료 시 "Terminated" 잡 알림 억제.
+- **macOS는 `aarch64`만**(P0 결정). 자산 3종.
+- `--smoke-gui` 플래그는 도입하지 않았다. GUI 창 검증은 로컬 macOS에서 수동으로 확인했고(§8 P3), CI에서는 **디스플레이 없을 때 헤드리스로 폴백하는지**만 검사한다(xvfb 불필요 → CI 최소화).
 
 ### 워크플로 C — `release.yml`
 
@@ -550,7 +551,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | **P1** 번들 파이프라인 | `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `docs-bundle.yml` | **✅ 완료** — v1.52.0으로 번들 생성(344.4MB, 맵 61항목), manifest 발행, 추출 경로에서 `GOOSE_DOCS_ROOT` 지정 시 스킬이 오프라인으로 문서 읽음(검증 통과) | 완료 |
 | **P2** 코어 + 헤드리스 서버 | `src/{main,cli,config,docs,server}.rs`, `tests/serve_test.rs`, `fixtures/docs-root/`, `tools/smoke-test.sh` | **✅ 완료** — 테스트 37개 통과, fmt/clippy clean. 실제 번들(61페이지) 서빙·`GOOSE_DOCS_ROOT=http://…`로 스킬 동작·404/경로이탈/원격바인드/포트해제 검증 | 완료 |
 | **P3** 패널 UI (egui) | `panel/mod.rs`, `panel/app.rs`, `config.rs`, `fonts.rs` | 3개 OS에서 더블클릭 → 창 → 설정 → 시작/중지/상태/URL 복사 동작. Linux는 `xvfb-run --smoke-gui` 통과 | 2~3일 |
-| **P4** 크로스 OS CI | `build-app.yml`, `smoke-test.sh` | 3개 OS 모두 green, 각 OS에서 스모크 테스트 통과 | 1일 |
+| **P4** 크로스 OS CI | `build-app.yml`, `release.yml`, `smoke-test.sh` | **✅ 구현 완료** — actionlint/shellcheck 통과, macOS·Linux(Ubuntu 컨테이너)에서 빌드·테스트·스모크 실측 통과. **GitHub Actions 실제 실행은 미검증**(원격 저장소 없음, §10.3) | 완료(실행 대기) |
 | **P5** 릴리스/서비스 | `release.yml`, service 모듈, README/AGENTS | 3 OS 자산 업로드, systemd/launchd/Windows 서비스 등록·해제 동작 | 1~2일 |
 | **P6** 선택 | Basic 인증, 검색 | 필요 시 | — |
 
@@ -597,6 +598,8 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 - **2026-09-26**: P0 확정(포트 10650, 번들 `site` 단일, 릴리즈 자산 배포, cron 1일 6회, macOS aarch64만, 영어 UI). 패널 방식을 egui 네이티브 창으로 확정하고 관련 절(§1, §3.1, §5.1, §5.3, §5.6~5.9, §6, §9, §11) 갱신.
 - **2026-09-26 (P1 완료)**: `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `.github/workflows/docs-bundle.yml`, `README.md` 작성. v1.52.0 실측으로 사실 F15~F21 추가, §4.1/§4.1.1/§4.1.2 갱신, 신규 리스크 G1~G3 등록. **site 번들이 344MB(스킬 필수분 1.8MB)임을 확인** — 대안 크기 측정치를 §4.1.2에 기록.
+- **2026-09-26 (P4 구현 완료)**: `build-app.yml`(3 OS 매트릭스), `release.yml` 추가, `tools/smoke-test.sh`를 Windows Git Bash 대응으로 재작성(disown, seq 제거, curl/체크섬 폴백). `actionlint`(shellcheck 포함) 3개 워크플로 0 errors, `shellcheck -S warning` 0 issues. **macOS와 Ubuntu 24.04 컨테이너에서 빌드·테스트 71개·스모크 테스트 실측 통과.** Windows 및 GitHub Actions 실제 실행은 미검증(§10.3).
+- **2026-09-26 (P3 완료)**: `panel/mod.rs`(GUI 비의존 상태 모델), `panel/app.rs`(eframe), `settings.rs`(영속화), `addr.rs` 추가. **실제 macOS GUI 창을 띄워 Start/Stop/창닫기를 클릭으로 검증**(스크린샷). eframe 0.36 API 변경(`App::ui`, `egui::Panel::top`)을 소스에서 확인해 반영. `--smoke-gui`는 도입하지 않음(xvfb 불필요).
 - **2026-09-26 (P2 완료)**: Rust 크레이트 구현(`src/`, 약 1,300줄, 테스트 37개), `fixtures/docs-root/`, `tools/smoke-test.sh`, `tests/serve_test.rs` 추가. **HTTP 관리 API를 두지 않는 것으로 결정**(패널이 프로세스 내에서 직접 제어) → §5.4 갱신. `--docs-dir`/`--docs-version`/`fetch`/`doctor` 구현. G1은 사용자 결정으로 **그대로 유지**.
 
 ## 10.2 미해결 검토 항목
@@ -605,6 +608,27 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 |---|---|---|
 | G1 | site 번들 344MB 축소 여부 | **결정: 그대로 유지** (사용자 결정, 2026-09-26). 대안 크기는 §4.1.2에 기록해 두었고 전환은 `tar --exclude` 한 줄 |
 | — | 패널에 문서 버전/페이지 수 표시 | P3 (`RunningServer`가 `docs_version`·`docs_entries` 제공) |
+
+---
+
+## 10.3 P4 검증 한계 (반드시 인지)
+
+| 항목 | 상태 |
+|---|---|
+| `actionlint` 3개 워크플로 | ✅ 0 errors (shellcheck 규칙 포함) |
+| `shellcheck -S warning` `tools/*.sh` | ✅ 0 issues |
+| **macOS**: 빌드 + 테스트 71개 + 스모크 테스트 | ✅ 실측 통과 |
+| **Linux(Ubuntu 24.04 컨테이너)**: 빌드 + 테스트 71개 + 스모크 테스트 + 디스플레이 없을 때 폴백 | ✅ 실측 통과 |
+| **Windows**: 빌드/실행 | ❌ **미검증** (Wine 없음, Windows 러너 필요) |
+| **GitHub Actions 실제 실행** | ❌ **미검증** — 원격 저장소가 없어 워크플로를 돌릴 수 없다 |
+
+`actionlint`는 문법·표현식·액션 입력을 검사하지만 **실행 결과를 보장하지 않는다.** 특히 다음은 실제 러너에서만 확인된다.
+- Windows에서의 빌드(eframe는 Windows에서 특별한 시스템 패키지가 필요 없다고 알려져 있으나 확인 필요)
+- Git Bash에서의 `smoke-test.sh` 동작
+- `Swatinem/rust-cache`, `upload-artifact` 조합
+- 러너의 기본 `curl`/`sha256` 도구 유무
+
+**다음 단계**: 원격 저장소를 만든 뒤 `build-app.yml`을 `workflow_dispatch`로 1회 실행해 3개 플랫폼 green을 확인한다. 이때 Windows 관련 문제가 나오면 그때 수정한다(추정으로 미리 고치지 않는다).
 
 ---
 
@@ -627,6 +651,34 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 - [x] 경로 이탈(`/../`, `/docs/../../`, `%2e%2e`) 403
 - [x] `--port 0` → 실제 포트를 로그·URL에 반영
 - [x] 플래그 없이 기본 바인드로 기동 → LAN IP에서 200 응답, 광고 URL이 wildcard 아님
+
+**P2.5 (추가 검증 — 실제 문서 사이트)**
+
+- [x] 실제 344MB 번들의 **HTML 사이트가 브라우저에서 정상 렌더**(홈/문서/설치 페이지 스크린샷)
+- [x] Docusaurus 절대경로 자산(`/assets/**`) 전부 200, `text/css`·`text/javascript` content-type 정상
+- [x] 사이트 전체 크롤링: **페이지 346개 / 자산 301개, 404 0건** (`tools/crawl-site.py`)
+- [x] 콘솔 에러 0건. React #418은 **공식 goose-docs.ai에서도 동일 발생**(업스트림 문제, 우리 서버 무관)
+- [x] 같은 서버로 `goose-doc-guide`가 문서를 읽음(61페이지 확인)
+
+**P3 (완료분 — 실제 GUI 클릭 검증)**
+
+- [x] macOS에서 패널 창이 뜨고 렌더링됨 (780×612, 스크린샷)
+- [x] **Start 클릭 → `*:10650 (LISTEN)`, LAN IP에서 200**
+- [x] 상태 표시: URL·Listening·Reach·Pages·Uptime·Requests 갱신
+- [x] **Stop 클릭 → 포트 해제, 연결 거부**
+- [x] **창 닫기 → 프로세스 종료 + 포트 해제**(고아 없음)
+- [x] 설정 저장(비밀값 없음), 실패 시 자동 헤드리스 폴백
+
+**P4 (구현 완료 — 실행 검증 일부 대기)**
+
+- [x] `actionlint`(shellcheck 규칙 포함) 3개 워크플로 0 errors
+- [x] `shellcheck -S warning tools/*.sh` 0 issues
+- [x] macOS 네이티브 빌드 + 테스트 71개 + 스모크 테스트 통과
+- [x] Linux(Ubuntu 24.04 컨테이너) 빌드 + 테스트 71개 + 스모크 테스트 + 디스플레이 없을 때 헤드리스 폴백 통과
+- [x] 워크플로 단계를 로컬에서 그대로 재현(fmt/clippy/build/test/스모크/패키징/체크섬 검증)
+- [x] 릴리즈 노트 렌더링 실제 실행 확인
+- [ ] **Windows 빌드·실행** — 미검증 (§10.3)
+- [ ] **GitHub Actions 실제 실행** — 원격 저장소 필요 (§10.3)
 - [x] 정지 시 포트 해제(재바인드 가능)
 - [x] `fetch`가 sha256 불일치 시 거부(구현), `doctor`가 잘못된 docs root에서 종료코드 1
 
