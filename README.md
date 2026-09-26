@@ -80,9 +80,21 @@ from disk with no network access.
 
 ## Automation
 
-`.github/workflows/docs-bundle.yml` runs 6 times a day, builds a bundle from
-the latest goose release, and publishes it as a release asset on this
-repository under the tag `docs-v<version>`. Nothing is written to the goose
+`.github/workflows/release.yml` runs 6 times a day. For each goose release it
+builds the docs bundle and the goose-doc binaries for every platform, and
+publishes them together in **one release tagged with the goose version**, for
+example `v1.52.0`:
+
+| asset | what it is |
+|---|---|
+| `goose-docs-<version>.tar.gz` | docs root: `goose-docs-map.md` + `docs/**` |
+| `goose-doc-linux-x86_64` | server, Linux x86_64 |
+| `goose-doc-macos-arm64` | server, macOS arm64 |
+| `goose-doc-windows-x86_64.exe` | server, Windows x86_64 |
+| `SHA256SUMS` | checksums for every asset |
+
+A release that already exists is skipped, so the six daily runs do not rebuild
+a large bundle when nothing has changed. Nothing is written to the goose
 repository; it is only read.
 
 ## Using the bundle

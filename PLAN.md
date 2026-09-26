@@ -226,7 +226,7 @@ goose-doc/
 
 **G2. 업스트림 문서 빌드가 깨지면 번들이 발행되지 않는다** (F15)
 - goose 릴리즈 태그에서 `npm run build`가 실패하면 그 버전은 자동 배포되지 않는다.
-- 완화: 실패 시 워크플로가 실패로 끝나고 **이전 `docs-v*` 자산은 그대로 남는다**(서비스 영향 없음). 수동으로 `workflow_dispatch` 재시도 가능.
+- 완화: 실패 시 워크플로가 실패로 끝나고 **이전 버전 릴리즈는 그대로 남는다**(서비스 영향 없음). 수동으로 `workflow_dispatch` 재시도 가능.
 - 업스트림이 ACP 스키마 파일명을 바꾸면 `build-docs-bundle.sh`의 하드코딩 경로가 깨진다 → 실패 시 그 경로만 갱신.
 
 **G3. 깨진 앵커 경고** (치명적이지 않음)
@@ -370,7 +370,7 @@ goose-doc doctor  [--docs-dir PATH] [--docs-version V] [--cache-dir DIR]
 ```
 
 - `doctor`: docs root 검증 결과·페이지 수·`GOOSE_DOCS_ROOT` 출력. 실패 시 종료코드 1.
-- `fetch`: 릴리즈 자산(`docs-v<ver>` 태그)에서 번들+manifest를 받아 **sha256 검증 후** 캐시에 압축 해제. 압축 해제 시 절대경로·`..` 항목은 건너뛴다.
+- `fetch`: goose 버전 태그 릴리즈에서 번들+manifest를 받아 **sha256 검증 후** 캐시에 압축 해제. 비공개 저장소는 GitHub API로 asset을 해석하고 `GH_TOKEN`(또는 `--token`)을 쓴다. 압축 해제 시 절대경로·`..` 항목은 건너뛴다.
 - 기본 캐시: OS 캐시 디렉터리 `goose-doc/bundles/<version>`.
 - 캐시가 비어 있고 `--docs-dir`도 없으면 **명확한 에러**로 안내한다(§5.1 초안의 "최신 캐시 자동 선택"은 캐시가 있을 때만 동작).
 
@@ -428,33 +428,32 @@ egui는 goose에 없으므로 우리가 책임지는 항목이 늘어난다. 아
 ## 6. 컴포넌트 C — GitHub Actions (CI/CD 최소화)
 
 **원칙**
-- 워크플로 3개. 그 이상 늘리지 않는다.
+- 워크플로 **2개**. 그 이상 늘리지 않는다.
 - goose 저장소에 트리거/PR/워크플로 추가 금지 → **우리 워크플로가 goose를 읽기만** 한다. (요구사항 4, F13)
 - 행렬 확장, 야간 빌드, 자동 머지, 의존성 자동 업데이트는 도입하지 않는다.
 
-### 워크플로 A — `docs-bundle.yml`
+### 워크플로 A — `release.yml` (번들 + 앱 통합)
 
-```
+**릴리즈 단위 = goose 버전.** 하나의 태그에 문서 번들과 3개 플랫폼 실행 파일이 함께 있다.
+
+```yaml
 on:
-  workflow_dispatch:            # 입력: goose_version(선택; 생략 시 최신 릴리즈)
+  workflow_dispatch:            # 입력: goose_version (생략 시 latest)
   schedule:
     - cron: "0 0,4,8,12,16,20 * * *"   # 1일 6회(4시간 간격, UTC)
+permissions: { contents: write, actions: read }
+concurrency: { group: release, cancel-in-progress: false }
 jobs:
-  resolve:   # goose 최신 릴리즈 태그 확정 (input > GitHub API)
-  bundle:    # ubuntu-latest, Node 20, npm ci + build + verify-build.sh → tarball + manifest
-  publish:   # goose-doc 릴리즈 자산으로 업로드 (tag: docs-v<goose_version>)
-permissions:
-  contents: write               # 릴리즈 자산 업로드에만 사용
-concurrency:
-  group: docs-bundle
-  cancel-in-progress: false     # 실행 중복 방지 (cron 6회/일 대비)
+  resolve:   # 버전 확정 + 릴리즈가 이미 있으면 skip=true
+  bundle:    # ubuntu 1회: docs 번들 생성 → artifact (skip이면 실행 안 함)
+  app:       # build-app.yml 재사용 (win / linux / macos-arm64)
+  publish:   # 번들 + 실행파일 + SHA256SUMS → 릴리즈 생성
 ```
 
-- **감지 주기: 1일 6회.** `cron: "0 0,4,8,12,16,20 * * *"` (4시간 간격).
-- **`repository_dispatch`는 쓰지 않는다.** 외부(goose 저장소·포크)에서 트리거를 걸어야 하므로 "goose 저장소에 아무것도 걸지 않는다"는 요구사항 4와 충돌한다. 폴링만으로 충분히 4시간 내 반영된다.
-  - (참고: GitHub Actions의 `schedule`은 저장소 비활동이 길어지면 자동 비활성화될 수 있다. 이 저장소에서 릴리즈가 계속 일어나면 문제 없지만, P5에서 첫 cron이 실제로 도는지 한 번 확인한다.)
-- **멱등성:** `tag: docs-v<goose_version>`이 이미 릴리즈 자산으로 존재하면 publish를 건너뛴다. 1일 6회 실행되어도 중복 업로드/중복 릴리즈를 만들지 않는다.
-- 번들은 **플랫폼 독립적**이므로 Linux에서 1회만 생성하고 3개 OS가 같은 자산을 쓴다(중복 제거 = CI 최소화).
+- **릴리즈 태그 = `<goose_version>`** (예: `v1.52.0`). 이전의 `docs-v*`/`app-v*` 분리는 폐기했다.
+- **멱등성**: `resolve`가 릴리즈 존재를 확인하고 `skip=true`를 내면 `bundle`/`app`/`publish`가 모두 건너뛴다. 1일 6회 실행해도 **344MB 번들을 매번 다시 만들지 않는다.**
+- 감지 방식은 폴링만 쓴다. `repository_dispatch`는 외부에서 트리거를 걸어야 하므로 "goose 저장소에 아무것도 걸지 않는다"는 요구사항 4와 충돌한다.
+- (참고: GitHub `schedule`은 장기 미활동 시 비활성화될 수 있다. §10.4의 확인 명령으로 주기 점검.)
 
 ### 워크플로 B — `build-app.yml` (P4 구현 완료)
 
@@ -492,23 +491,6 @@ steps:
 - 스모크 테스트는 `tools/smoke-test.sh`이며 **Git Bash(Windows)에서도 동작**하도록 작성했다: `curl.exe` 폴백, `seq` 미사용, `sha256sum`/`shasum` 양쪽 지원, `disown`으로 종료 시 "Terminated" 잡 알림 억제.
 - **macOS는 `aarch64`만**(P0 결정). 자산 3종.
 - `--smoke-gui` 플래그는 도입하지 않았다. GUI 창 검증은 로컬 macOS에서 수동으로 확인했고(§8 P3), CI에서는 **디스플레이 없을 때 헤드리스로 폴백하는지**만 검사한다(xvfb 불필요 → CI 최소화).
-
-### 워크플로 C — `release.yml`
-
-```
-on:
-  workflow_dispatch:            # 입력: goose_version(필수)
-jobs:
-  build:  # build-app.yml 재사용 (win / linux / macos-arm64)
-  release:
-    · 자산명: goose-doc-<appver>-<target>[.exe|.tar.gz]
-    · sha256 파일 동봉
-    · 업로드 위치: goose-doc 저장소의 자체 릴리즈 태그 (예: app-v0.1.0)
-```
-
-- **번들 배포 위치(확정): goose-doc 저장소의 릴리즈 자산.** 문서 번들은 `docs-v<goose_version>` 태그, 앱 실행 파일은 `app-v<appver>` 태그로 분리한다. 외부 스토리지/사내 파일 서버는 쓰지 않는다.
-- 결과물: OS별 실행 파일 **3종**(win / linux / macos-arm64) + 문서 번들. 릴리즈 노트에 goose 버전, 문서 페이지 수, 라이선스 고지를 자동 기입.
-- 앱이 런타임에 번들을 받을 때의 기본 소스도 이 릴리즈 자산이 된다(§5.1 `fetch`, `--docs-version`). 에어갭 환경은 이 파일을 수동 반입한다.
 
 ---
 
@@ -565,7 +547,8 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | Linux 빌드에 GUI 시스템 패키지 필요 | CI 빌드 실패 | 워크플로 B에 `libxcb-*-dev`/`libxkbcommon-dev` 설치 스텝 1줄 (§6) |
 | `onBrokenLinks: throw`로 문서 빌드 실패 | 번들 생성 중단 | goose CI와 **동일 순서**(ACP 문서 생성 → npm ci → build → verify) 재현, 실패 시 이전 정상 버전 유지 |
 | goose 버전과 문서 버전 불일치 | 오답 유발 | 릴리즈 태그로 고정(F6). 매니페스트에 `goose_version` 기록, 패널에 표시 |
-| 38MB 번들 다운로드(에어갭) | 배포 불편 | `fetch` 명령으로 사전 반입, `--docs-dir` 지원, 릴리스 자산으로 반입 (lean 변형은 미채택) |
+| 344MB 번들 다운로드(에어갭) | 배포 불편 | `fetch` 명령으로 사전 반입, `--docs-dir` 지원, 릴리스 자산으로 반입 (lean 변형은 미채택) |
+| 릴리즈가 커짐(번들 344MB + 실행파일 3종) | 다운로드 부담 | 릴리즈 하나에 모아 태그 관리 단순화. 필요한 자산만 `gh release download -p`로 선택 다운로드 |
 | 문서 재배포 라이선스 | 법적 | Apache-2.0 고지(NOTICE, README, UI에 upstream 출처·버전·라이선스 표기) (F11) |
 | 포트 충돌 | 시작 실패 | `--port 0`(임의 포트) 지원, 사용 중 포트는 UI에서 오류 표시 |
 | 네트워크 노출 | 사내 열람 | **기본이 모든 인터페이스인 것은 의도된 동작**(서버 호스팅이 목적). 제한은 `--local-only`, 선택적 Basic 인증(P6). 노출되는 내용은 공개 문서(Apache-2.0)뿐 |
@@ -584,11 +567,11 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | 4 | 기본 포트 | **10650** (0이면 임의 포트) | 사용자 결정 |
 | 5 | 기본 바인드 | **`0.0.0.0` (모든 인터페이스)** — 다른 PC가 접속할 수 있어야 서버 호스팅이 성립 | 요구사항 5(서버 실행). 제한은 `--local-only` |
 | 6 | 번들 변형 | **`site` 전체만** (HTML + md + map). `lean` 미채택 | 배포 경로 단일화. §4.2 |
-| 7 | 번들 배포 위치 | **goose-doc 저장소 릴리즈 자산** (`docs-v*` 태그) | 사용자 결정. §6-C |
+| 7 | 번들 배포 위치 | **goose-doc 저장소 릴리즈 자산, goose 버전 태그 하나에 번들+실행파일 통합** | 사용자 결정(변경). §6-A |
 | 8 | goose 신버전 감지 | **1일 6회 cron** (4시간 간격). `repository_dispatch` 미사용 | 사용자 결정 + 요구사항 4. §6-A |
 | 9 | macOS 아키텍처 | **`aarch64`만** (Intel은 범위 제외) | 권장안. `x86_64`는 `rustup target add` 한 줄로 추가 가능. §6-B |
 | 10 | 패널 UI 언어 | **영어** | egui 기본 폰트에 CJK 없음. §5.8 |
-| 11 | 워크플로 수 | **3개 고정** (번들/앱/릴리스) | 요구사항 4 |
+| 11 | 워크플로 수 | **2개** (릴리스 / 앱 빌드 재사용) | 요구사항 4. 통합으로 3→2 |
 
 미결정 항목 없음. P1부터 구현 착수 가능.
 
@@ -598,6 +581,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 - **2026-09-26**: P0 확정(포트 10650, 번들 `site` 단일, 릴리즈 자산 배포, cron 1일 6회, macOS aarch64만, 영어 UI). 패널 방식을 egui 네이티브 창으로 확정하고 관련 절(§1, §3.1, §5.1, §5.3, §5.6~5.9, §6, §9, §11) 갱신.
 - **2026-09-26 (P1 완료)**: `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `.github/workflows/docs-bundle.yml`, `README.md` 작성. v1.52.0 실측으로 사실 F15~F21 추가, §4.1/§4.1.1/§4.1.2 갱신, 신규 리스크 G1~G3 등록. **site 번들이 344MB(스킬 필수분 1.8MB)임을 확인** — 대안 크기 측정치를 §4.1.2에 기록.
+- **2026-09-26 (릴리즈 구조 변경)**: 릴리즈를 **goose 버전 기준 하나로 통합**했다. `release.yml`이 `docs-bundle.yml`을 흡수해 번들과 3개 실행 파일을 같은 태그(`v<goose_version>`)에 발행한다. `resolve` 잡이 기존 릴리즈를 확인해 **skip**하므로 1일 6회 실행에도 번들을 재빌드하지 않는다. 워크플로 3→2개. `fetch`의 릴리즈 태그도 `docs-v<ver>`→`v<ver>`로 변경. 실측: `v1.52.0` 릴리즈에 번들+실행파일 3종+SHA256SUMS, fetch/서빙/크롤링 통과, 재실행 시 `already exists; nothing to do.`
 - **2026-09-26 (P5 검증)**: 스케줄/자동 감지/멱등성 실측 완료(§10.4). 입력 없는 실행이 `v1.52.0`을 자동 감지했고, 재실행은 멱등하게 스킵했으며, v1.51.0으로 신규 번들 발행 → fetch → 서빙까지 버전별로 다른 문서가 제공되는 것을 확인했다. **cron 자체의 자동 실행은 아직 시각이 지나지 않아 미확인**(§10.4).
 - **2026-09-26 (P5 완료)**: `src/service.rs`(systemd 사용자/시스템, launchd, Windows `sc.exe`), `fetch`의 **비공개 저장소 지원**(GitHub API로 asset 해석) 과 **스트리밍 다운로드**(344MB를 메모리에 올리지 않음), `tools/check-linux.sh`(Linux 컨테이너에서 CI 동일 검증). 릴리스 `app-v0.1.0` 발행(3 OS + SHA256SUMS), 번들 `docs-v1.52.0` 발행. CI가 **컴파일 결함 2건**(Linux/Windows에서 각각 cfg로 인한 미사용 경고)을 잡아냈고, 이를 계기로 서비스 정의를 순수 함수로 분리해 **단일 테스트로 3플랫폼을 검증**하도록 구조를 바꿨다. **launchd 서비스를 실제 등록해 서빙까지 확인.**
 - **2026-09-26 (P4 완료)**: `build-app.yml`(3 OS 매트릭스), `release.yml` 추가, `tools/smoke-test.sh`를 Windows Git Bash 대응으로 재작성(disown, seq 제거, curl/체크섬 폴백). 비공개 저장소 **`soolmuk/goose-doc`** 생성 후 CI 3회 실행 → **3개 플랫폼 green**(run 36206440329), 아티팩트 3종. CI가 로컬에서 놓친 결함 **2건(D1 fmt, D2 아티팩트 입력)** 을 잡아냄 → §10.3. CI가 빌드한 Linux 바이너리로 실제 344MB 번들 서빙 확인.
