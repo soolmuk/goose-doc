@@ -23,6 +23,7 @@ GOOSE_DOCS_ROOT=http://docs.internal:10650
 | **P3** | **egui panel, settings persistence** | **done** |
 | **P4** | **Cross-OS build and smoke tests** | **done** |
 | **P5** | **Release assets, service install** | **done** |
+| — | **Single-file distribution (docs embedded)** | **done** |
 
 See [PLAN.md](PLAN.md) for the full plan.
 
@@ -81,17 +82,17 @@ from disk with no network access.
 ## Automation
 
 `.github/workflows/release.yml` runs 6 times a day. For each goose release it
-builds the docs bundle and the goose-doc binaries for every platform, and
-publishes them together in **one release tagged with the goose version**, for
-example `v1.52.0`:
+builds the binaries and the docs bundles, and publishes them together in **one
+release tagged with the goose version**, for example `v1.52.0`:
 
-| asset | what it is |
-|---|---|
-| `goose-docs-<version>.tar.gz` | docs root: `goose-docs-map.md` + `docs/**` |
-| `goose-doc-linux-x86_64` | server, Linux x86_64 |
-| `goose-doc-macos-arm64` | server, macOS arm64 |
-| `goose-doc-windows-x86_64.exe` | server, Windows x86_64 |
-| `SHA256SUMS` | checksums for every asset |
+| asset | what it is | size |
+|---|---|---|
+| `goose-doc-linux-x86_64` | server, Linux x86_64 | ~25 MB |
+| `goose-doc-macos-arm64` | server, macOS arm64 | ~18 MB |
+| `goose-doc-windows-x86_64.exe` | server, Windows x86_64 | ~16 MB |
+| `goose-docs-<version>-lean.tar.gz` | the pages the skill reads | ~190 KB |
+| `goose-docs-<version>.tar.gz` | full docs root, adds blog media for browsing | ~344 MB |
+| `SHA256SUMS` | checksums for every asset | |
 
 A release that already exists is skipped, so the six daily runs do not rebuild
 a large bundle when nothing has changed. Nothing is written to the goose
@@ -108,14 +109,25 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 ## Serving it
 
-`goose-doc` serves a docs root over HTTP so other machines can use it. It
+**One file is enough.** The documentation is embedded in the binary, so a single
+executable starts serving with no download and no configuration:
+
+```bash
+./goose-doc              # opens the panel
+./goose-doc --headless   # no UI, for a server
+```
+
+`goose-doc` serves the documentation over HTTP so other machines can use it. It
 listens on every interface by default, which is what a server deployment wants.
 
 ```bash
-# Serve a bundle version from the cache (see `goose-doc fetch` below)
+# Embedded docs (default)
 ./goose-doc --port 10650
 
-# Or serve a docs root directly
+# A downloaded bundle, if one is cached
+./goose-doc --docs-version 1.52.0 --port 10650
+
+# A docs root on disk
 ./goose-doc --docs-dir /opt/goose-docs --port 10650
 ```
 
@@ -138,8 +150,10 @@ export GOOSE_DOCS_ROOT=http://<server-ip>:10650
 Other commands:
 
 ```bash
-# Download a bundle into the cache (verifies sha256 before extracting)
+# Download a bundle into the cache (checksum-verified before extracting).
+# The default is the lean bundle; --variant site gets the full one.
 ./goose-doc fetch 1.52.0
+./goose-doc fetch 1.52.0 --variant site
 
 # Show what would be served and whether the docs root is valid
 ./goose-doc doctor --docs-dir /opt/goose-docs
@@ -167,6 +181,23 @@ GH_TOKEN=... ./goose-doc fetch 1.52.0
 The server deliberately does **not** render pages or fall back to an HTML
 shell: a missing path returns 404, so a broken link surfaces instead of being
 masked. Markdown is served as `text/plain`, which is what the skill reads.
+
+### What gets served, and from where
+
+The documentation is embedded in the binary, so `goose-doc` works with nothing
+else on the machine. A downloaded bundle takes precedence when one is present,
+because the full site bundle also carries the blog images and videos the HTML
+site needs.
+
+The order is:
+
+1. `--docs-dir`
+2. `--docs-version`
+3. newest cached bundle
+4. **the copy embedded in the binary**
+
+Only the pages `goose-docs-map.md` names are embedded (61 pages, ~760 KB),
+which keeps the binary small. `goose-doc doctor` reports which one is in use.
 
 ### Behaviour worth knowing
 
