@@ -91,9 +91,11 @@ if [ "$KEEP_SRC" = "1" ] && [ -d "$SRC_DIR/.git" ]; then
 else
   echo "==> Cloning $GOOSE_REPO_URL at $TAG"
   rm -rf "$SRC_DIR"
-  # The tag itself is fetched rather than relying on --branch so that a bare
-  # version and a v-prefixed tag resolve the same way.
+  # A shallow clone carries only the default branch, so the tag is fetched
+  # explicitly. Relying on `checkout <tag>` alone fails with "pathspec did not
+  # match" because the tag is not in the shallow history.
   git clone --quiet --depth 1 --no-checkout "$GOOSE_REPO_URL" "$SRC_DIR"
+  git -C "$SRC_DIR" fetch --quiet --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"
   git -C "$SRC_DIR" checkout --quiet "$TAG"
 fi
 
