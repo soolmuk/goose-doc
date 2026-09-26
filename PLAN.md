@@ -552,7 +552,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | **P2** 코어 + 헤드리스 서버 | `src/{main,cli,config,docs,server}.rs`, `tests/serve_test.rs`, `fixtures/docs-root/`, `tools/smoke-test.sh` | **✅ 완료** — 테스트 37개 통과, fmt/clippy clean. 실제 번들(61페이지) 서빙·`GOOSE_DOCS_ROOT=http://…`로 스킬 동작·404/경로이탈/원격바인드/포트해제 검증 | 완료 |
 | **P3** 패널 UI (egui) | `panel/mod.rs`, `panel/app.rs`, `config.rs`, `fonts.rs` | 3개 OS에서 더블클릭 → 창 → 설정 → 시작/중지/상태/URL 복사 동작. Linux는 `xvfb-run --smoke-gui` 통과 | 2~3일 |
 | **P4** 크로스 OS CI | `build-app.yml`, `release.yml`, `smoke-test.sh` | **✅ 완료** — `soolmuk/goose-doc`에서 **3개 플랫폼(x86_64 linux/win, macos arm64) green**. 각 플랫폼에서 빌드·테스트 71개·스모크 테스트 실측 통과, 아티팩트 3종 업로드 | 완료 |
-| **P5** 릴리스/서비스 | `release.yml`, service 모듈, README/AGENTS | 3 OS 자산 업로드, systemd/launchd/Windows 서비스 등록·해제 동작 | 1~2일 |
+| **P5** 릴리스/서비스 | `release.yml`, `src/service.rs`, `tools/check-linux.sh` | **✅ 완료** — 3 OS 자산 릴리스 발행(`app-v0.1.0`), launchd 서비스 실등록·서빙 검증, 시스템/사용자 systemd·launchd·Windows 정의를 **플랫폼 무관 테스트**. 테스트 89개 | 완료 |
 | **P6** 선택 | Basic 인증, 검색 | 필요 시 | — |
 
 ---
@@ -598,6 +598,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 - **2026-09-26**: P0 확정(포트 10650, 번들 `site` 단일, 릴리즈 자산 배포, cron 1일 6회, macOS aarch64만, 영어 UI). 패널 방식을 egui 네이티브 창으로 확정하고 관련 절(§1, §3.1, §5.1, §5.3, §5.6~5.9, §6, §9, §11) 갱신.
 - **2026-09-26 (P1 완료)**: `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `.github/workflows/docs-bundle.yml`, `README.md` 작성. v1.52.0 실측으로 사실 F15~F21 추가, §4.1/§4.1.1/§4.1.2 갱신, 신규 리스크 G1~G3 등록. **site 번들이 344MB(스킬 필수분 1.8MB)임을 확인** — 대안 크기 측정치를 §4.1.2에 기록.
+- **2026-09-26 (P5 완료)**: `src/service.rs`(systemd 사용자/시스템, launchd, Windows `sc.exe`), `fetch`의 **비공개 저장소 지원**(GitHub API로 asset 해석) 과 **스트리밍 다운로드**(344MB를 메모리에 올리지 않음), `tools/check-linux.sh`(Linux 컨테이너에서 CI 동일 검증). 릴리스 `app-v0.1.0` 발행(3 OS + SHA256SUMS), 번들 `docs-v1.52.0` 발행. CI가 **컴파일 결함 2건**(Linux/Windows에서 각각 cfg로 인한 미사용 경고)을 잡아냈고, 이를 계기로 서비스 정의를 순수 함수로 분리해 **단일 테스트로 3플랫폼을 검증**하도록 구조를 바꿨다. **launchd 서비스를 실제 등록해 서빙까지 확인.**
 - **2026-09-26 (P4 완료)**: `build-app.yml`(3 OS 매트릭스), `release.yml` 추가, `tools/smoke-test.sh`를 Windows Git Bash 대응으로 재작성(disown, seq 제거, curl/체크섬 폴백). 비공개 저장소 **`soolmuk/goose-doc`** 생성 후 CI 3회 실행 → **3개 플랫폼 green**(run 36206440329), 아티팩트 3종. CI가 로컬에서 놓친 결함 **2건(D1 fmt, D2 아티팩트 입력)** 을 잡아냄 → §10.3. CI가 빌드한 Linux 바이너리로 실제 344MB 번들 서빙 확인.
 - **2026-09-26 (P3 완료)**: `panel/mod.rs`(GUI 비의존 상태 모델), `panel/app.rs`(eframe), `settings.rs`(영속화), `addr.rs` 추가. **실제 macOS GUI 창을 띄워 Start/Stop/창닫기를 클릭으로 검증**(스크린샷). eframe 0.36 API 변경(`App::ui`, `egui::Panel::top`)을 소스에서 확인해 반영. `--smoke-gui`는 도입하지 않음(xvfb 불필요).
 - **2026-09-26 (P2 완료)**: Rust 크레이트 구현(`src/`, 약 1,300줄, 테스트 37개), `fixtures/docs-root/`, `tools/smoke-test.sh`, `tests/serve_test.rs` 추가. **HTTP 관리 API를 두지 않는 것으로 결정**(패널이 프로세스 내에서 직접 제어) → §5.4 갱신. `--docs-dir`/`--docs-version`/`fetch`/`doctor` 구현. G1은 사용자 결정으로 **그대로 유지**.
@@ -607,7 +608,8 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | ID | 항목 | 상태 |
 |---|---|---|
 | G1 | site 번들 344MB 축소 여부 | **결정: 그대로 유지** (사용자 결정, 2026-09-26). 대안 크기는 §4.1.2에 기록해 두었고 전환은 `tar --exclude` 한 줄 |
-| — | 패널에 문서 버전/페이지 수 표시 | P3 (`RunningServer`가 `docs_version`·`docs_entries` 제공) |
+| — | 패널에 문서 버전/페이지 수 표시 | 완료 (P3: `RunningServer`가 `docs_version`·`docs_entries` 제공) |
+| — | 번들 다운로드가 비공개 저장소에 토큰을 요구 | 완료 (P5: `--token`/`GH_TOKEN`, GitHub API로 asset 해석) |
 
 ---
 
@@ -637,7 +639,20 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 - 아티팩트 목록이 비어 있는 것을 보고 발견했다.
 - 수정: 입력을 양쪽 트리거에 선언하고 조건을 `inputs.upload_artifacts == true || inputs.upload_artifacts == ''`로 명시.
 
-**다음 단계**: Windows/macOS 문제는 실제로 발생하지 않았다(3개 플랫폼 green).
+### P5에서 CI가 잡아낸 결함 (플랫폼별 빌드)
+
+**D3. Linux에서 `cargo clippy` 실패 — macOS 전용 함수가 미사용**
+`escape_xml`(launchd 전용)이 Linux에서 `dead_code`로 걸렸다. macOS에서만 빌드했기 때문에 로컬에서 보이지 않았다.
+
+**D4. Windows에서 `cargo clippy` 실패 — 같은 부류 2건**
+`hostname`, `config_home`이 Windows에서 미사용으로 걸렸다. `#[cfg]`로 변수를 조건부 선언하던 구조가 원인이었다.
+
+**대응 (구조 변경)**
+플랫폼별 서비스 정의를 **순수 함수**(`systemd_plan`, `launchd_plan`, `windows_plan`)로 분리하고 **모든 플랫폼에서 컴파일**되게 했다. 결과: 한 번의 테스트 실행으로 3개 정의를 모두 검증하므로, cfg 실수를 3개 러너에 의존하지 않고 즉시 찾는다. 부수적으로 `tools/check-linux.sh`를 추가해 Linux 검증을 로컬에서 재현할 수 있게 했다(D3이 이 스크립트로 즉시 재현됐다).
+
+**교훈**: `#[cfg]`로 변수를 조건부 선언하지 말고, 조건부 로직을 분리해 전 플랫폼에서 컴파일·테스트한다.
+
+**다음 단계**: Windows/macOS의 컴파일 문제는 이 구조 변경으로 해소됐고, 3개 플랫폼이 green이다.
 
 ---
 

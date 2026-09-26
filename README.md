@@ -22,7 +22,7 @@ GOOSE_DOCS_ROOT=http://docs.internal:10650
 | **P2** | **Headless server, docs resolution, tests** | **done** |
 | **P3** | **egui panel, settings persistence** | **done** |
 | **P4** | **Cross-OS build and smoke tests** | **done** |
-| P5 | Release assets, service install | planned |
+| **P5** | **Release assets, service install** | **done** |
 
 See [PLAN.md](PLAN.md) for the full plan.
 
@@ -134,6 +134,22 @@ Other commands:
 
 # List the addresses this machine can serve on
 ./goose-doc addresses
+
+# Install a background service (systemd / launchd / Windows service)
+sudo ./goose-doc service install --apply --start --docs-dir /opt/goose-docs
+./goose-doc service status
+sudo ./goose-doc service uninstall --apply
+```
+
+`service install` prints the unit or agent before writing anything; add
+`--apply` to write it. The service always runs `--headless`, since a background
+service has no display.
+
+Bundles are published as release assets. If the repository is private, set
+`GH_TOKEN` (or pass `--token`) so `fetch` can read them:
+
+```bash
+GH_TOKEN=... ./goose-doc fetch 1.52.0
 ```
 
 The server deliberately does **not** render pages or fall back to an HTML
