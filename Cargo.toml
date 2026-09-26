@@ -1,0 +1,31 @@
+[package]
+name = "goose-doc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+description = "Serve goose documentation locally for the goose-doc-guide skill"
+license = "Apache-2.0"
+
+# Detach from any workspace that may exist in a parent directory.
+[workspace]
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+clap = { version = "4.6.7", features = ["derive", "std", "help", "suggestions", "usage", "color", "error-context"] }
+dirs = "7.0.0"
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+flate2 = "1.1.10"
+if-addrs = "0.15"
+open = "5.4.4"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "stream"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+sha2 = "0.11.0"
+tar = "0.4.46"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "signal", "macros", "fs", "io-util", "sync"] }
+tower-http = { version = "0.7.1", default-features = false, features = ["fs", "set-header", "trace", "cors", "limit"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+walkdir = "2.5.0"

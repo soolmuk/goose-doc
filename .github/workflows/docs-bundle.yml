@@ -1,0 +1,135 @@
+name: Docs Bundle
+
+# Builds a goose docs bundle (docs root: goose-docs-map.md + docs/**) from a
+# goose release tag and publishes it as a release asset on this repository.
+#
+# The bundle is platform independent, so it is built once here and shared by
+# every goose-doc target. Nothing is written to the goose repository; it is
+# only read.
+#
+# Runs 6x/day so a new goose release is picked up within ~4 hours.
+on:
+  workflow_dispatch:
+    inputs:
+      goose_version:
+        description: "goose release tag or version (blank = latest release)"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 0,4,8,12,16,20 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-bundle
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve goose version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - name: Pick version
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.goose_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION}" ]; then
+            TAG="${INPUT_VERSION}"
+          else
+            TAG="$(gh api repos/aaif-goose/goose/releases/latest --jq '.tag_name')"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v$TAG" ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Resolved goose release: $TAG"
+
+  bundle:
+    name: Build and publish bundle
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "20"
+
+      - name: Build bundle
+        run: |
+          set -euo pipefail
+          ./tools/build-docs-bundle.sh "${{ needs.resolve.outputs.tag }}" --out-dir ./out
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: goose-docs-${{ needs.resolve.outputs.version }}
+          path: ./out/goose-docs-${{ needs.resolve.outputs.version }}.tar.gz*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="docs-v${VERSION}"
+          BUNDLE="goose-docs-${VERSION}.tar.gz"
+          MANIFEST="${BUNDLE}.manifest.json"
+
+          ENTRIES="$(jq -r '.entries' "out/${MANIFEST}")"
+          SHA="$(jq -r '.sha256' "out/${MANIFEST}")"
+          BYTES="$(jq -r '.bytes' "out/${MANIFEST}")"
+          SIZE_MB="$(awk -v b="$BYTES" 'BEGIN { printf "%.1f", b/1048576 }')"
+          echo "Bundle size: ${SIZE_MB} MB (${ENTRIES} doc entries)"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if gh release view "$RELEASE_TAG" --json assets \
+                 --jq '.assets[].name' | grep -qx "$BUNDLE"; then
+              echo "Asset already published for $TAG; nothing to do."
+              exit 0
+            fi
+            echo "Uploading to existing release $RELEASE_TAG"
+            gh release upload "$RELEASE_TAG" \
+              "out/${BUNDLE}" "out/${MANIFEST}" --clobber
+          else
+            # printf avoids a heredoc body, which would have to sit at column 0
+            # and break the YAML block indentation.
+            printf '%s\n' \
+              "goose docs bundle for \`$TAG\`." \
+              "" \
+              "| field | value |" \
+              "|---|---|" \
+              '| docs root | `goose-docs-map.md` + `docs/**` |' \
+              "| doc entries | $ENTRIES |" \
+              "| size | $SIZE_MB MB |" \
+              "| sha256 | \`$SHA\` |" \
+              "" \
+              "Point goose at it once it is served:" \
+              "" \
+              '```' \
+              "GOOSE_DOCS_ROOT=http://<host>:<port>" \
+              '```' \
+              "" \
+              "Documentation content is Apache-2.0, from" \
+              "https://github.com/aaif-goose/goose (\`$TAG\`)." \
+              > notes.md
+
+            gh release create "$RELEASE_TAG" \
+              "out/${BUNDLE}" "out/${MANIFEST}" \
+              --title "goose docs $VERSION" \
+              --notes-file notes.md
+          fi
