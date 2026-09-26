@@ -79,6 +79,7 @@ pub fn plan(settings: &Settings, docs_dir: &Path, bin: &Path, port: u16) -> Resu
         .collect::<Vec<_>>()
         .join(" ");
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let hostname = hostname();
 
     #[cfg(target_os = "linux")]
@@ -364,6 +365,7 @@ fn config_home() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -384,17 +386,14 @@ extern "C" {
     fn libc_geteuid() -> u32;
 }
 
-#[cfg(target_os = "macos")]
+/// Escape XML text content. Only the macOS plist needs it, but keeping one
+/// definition avoids a platform-specific dead-code warning.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn escape_xml(value: &str) -> String {
-    value.to_string()
 }
 
 #[cfg(target_os = "windows")]
