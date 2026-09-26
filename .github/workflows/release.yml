@@ -93,6 +93,19 @@ jobs:
               --build-dir /tmp/site \
               --out "./out/goose-docs-${{ needs.resolve.outputs.version }}-lean.tar.gz"
           }
+          # The browsable bundle is the built site minus the blog and the demo
+          # videos. It is what a release binary embeds, so a single executable
+          # serves the documentation site itself, not markdown alone.
+          mkdir -p /tmp/site
+          tar xzf "./out/goose-docs-${{ needs.resolve.outputs.version }}.tar.gz" -C /tmp/site
+          # Pillow downscales oversized images. It is optional: without it the
+          # bundle is larger, but it still builds, so a failed install (for
+          # example a Python that refuses system-wide packages) is not fatal.
+          python3 -m pip install --quiet pillow \
+            || python3 -m pip install --quiet --break-system-packages pillow \
+            || echo "pillow unavailable; images will not be downscaled"
+          ./tools/build-site-lite.py /tmp/site --dir \
+            --out "./out/goose-docs-${{ needs.resolve.outputs.version }}-browsable.tar.gz"
           ls -la ./out
 
       - name: Upload bundles

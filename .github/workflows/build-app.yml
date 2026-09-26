@@ -95,12 +95,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Always embed the lean bundle. The artifact also contains the full
-          # site bundle (~344 MB), and picking with `find | head -1` selected
-          # whichever the filesystem happened to list first, which differed per
-          # platform and produced 330 MB binaries.
-          BUNDLE="$(find bundle -name 'goose-docs-*-lean.tar.gz' -type f | head -1)"
-          test -n "$BUNDLE" || { echo "no lean bundle found in ./bundle" >&2; exit 1; }
+          # Prefer the browsable bundle, so the binary serves the documentation
+          # site as well as the markdown. It is named explicitly rather than
+          # globbed loosely: the artifact also holds the full 344 MB site bundle,
+          # and a loose match once picked it up and produced a 330 MB binary.
+          BUNDLE="$(find bundle -name 'goose-docs-*-browsable.tar.gz' -type f | head -1)"
+          if [ -z "$BUNDLE" ]; then
+            BUNDLE="$(find bundle -name 'goose-docs-*-lean.tar.gz' -type f | head -1)"
+          fi
+          test -n "$BUNDLE" || { echo "no browsable or lean bundle found in ./bundle" >&2; exit 1; }
           echo "embedding $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
           ./tools/embed-docs.sh "$BUNDLE"
 

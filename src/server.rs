@@ -207,7 +207,10 @@ async fn serve_file(State(state): State<AppState>, uri: Uri) -> Response {
                 )
                     .into_response()
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Fall through to the embedded copy, which may carry the HTML
+                // site for a docs root that only holds markdown.
+            }
             Err(error) => {
                 warn!("failed to read {}: {error}", target.display());
                 return (StatusCode::INTERNAL_SERVER_ERROR, "failed to read file").into_response();
@@ -215,11 +218,14 @@ async fn serve_file(State(state): State<AppState>, uri: Uri) -> Response {
         }
     }
 
-    match crate::embedded::get(&relative) {
-        Some(bytes) => (
+    // The embedded copy mirrors the on-disk behaviour, including resolving a
+    // directory or an extensionless route to its `index.html`, so the built
+    // site is browsable from a single executable.
+    match crate::embedded::resolve(&relative) {
+        Some((resolved, bytes)) => (
             [(
                 header::CONTENT_TYPE,
-                HeaderValue::from_static(content_type_for(&relative)),
+                HeaderValue::from_static(content_type_for(&resolved)),
             )],
             bytes,
         )

@@ -26,9 +26,10 @@ if [ ! -f "$BUNDLE" ]; then
   exit 1
 fi
 
-# Refuse the full site bundle. It carries blog images and videos that the skill
-# never reads, and embedding it would produce a multi-hundred-megabyte binary.
-MAX_BYTES=$((32 * 1024 * 1024))
+# Refuse the full site bundle. It carries blog images and videos that nothing
+# reads, and embedding it would produce a multi-hundred-megabyte binary. The
+# browsable bundle (the site minus that media) is well under this limit.
+MAX_BYTES=$((64 * 1024 * 1024))
 SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
 if [ "$SIZE" -gt "$MAX_BYTES" ]; then
   echo "Error: $BUNDLE is $((SIZE / 1048576)) MB." >&2
@@ -37,7 +38,9 @@ if [ "$SIZE" -gt "$MAX_BYTES" ]; then
 fi
 
 if [ -z "$VERSION" ]; then
-  VERSION="$(basename "$BUNDLE" | sed -n 's/^goose-docs-\(.*\)\.tar\.gz$/\1/p' | sed 's/-lean$//')"
+  # Bundle names carry a variant suffix: goose-docs-1.52.0-lean.tar.gz,
+  # goose-docs-1.52.0-browsable.tar.gz, or goose-docs-1.52.0.tar.gz.
+  VERSION="$(basename "$BUNDLE" | sed -n 's/^goose-docs-\(.*\)\.tar\.gz$/\1/p' | sed 's/-lean$//' | sed 's/-browsable$//')"
 fi
 
 if [ -z "$VERSION" ]; then
