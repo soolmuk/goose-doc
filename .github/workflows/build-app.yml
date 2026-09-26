@@ -122,6 +122,40 @@ jobs:
         shell: bash
         run: ./tools/smoke-test.sh target/${{ matrix.target }}/release/goose-doc
 
+      # The shipped binary embeds the docs, so confirm that a build with no
+      # downloaded bundle and no --docs-dir still serves. This is the path a
+      # user takes when they download only the executable.
+      - name: Serves embedded docs with no bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/goose-doc"
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+
+          CACHE="$(mktemp -d)"
+          LOG="$(mktemp)"
+          "$BIN" --headless --cache-dir "$CACHE" --port 0 > "$LOG" 2>&1 &
+          PID=$!
+          disown "$PID" 2>/dev/null || true
+
+          ADDR=""
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do
+            ADDR="$(sed -n 's|.*Serving goose docs at http://\([^ ]*\).*|\1|p' "$LOG" | head -1)"
+            [ -n "$ADDR" ] && break
+            sleep 0.2
+          done
+          [ -n "$ADDR" ] || { echo "no address reported"; cat "$LOG"; exit 1; }
+
+          echo "serving from an empty cache at http://$ADDR"
+          MAP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://$ADDR/goose-docs-map.md")"
+          [ "$MAP_CODE" = "200" ] || { echo "map returned $MAP_CODE"; cat "$LOG"; exit 1; }
+
+          PAGES="$(curl -s "http://$ADDR/goose-docs-map.md" | grep -cE '^\(docs/[^)]+\.md\)' || true)"
+          echo "embedded map served; page links: ${PAGES:-0}"
+
+          kill "$PID" 2>/dev/null || true
+          echo "embedded docs OK"
+
       # A window cannot be opened on a headless runner, so confirm the panel
       # path degrades to headless instead of failing. Linux is the platform
       # where this matters, since servers have no display.
