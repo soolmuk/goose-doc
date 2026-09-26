@@ -581,6 +581,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 - **2026-09-26**: P0 확정(포트 10650, 번들 `site` 단일, 릴리즈 자산 배포, cron 1일 6회, macOS aarch64만, 영어 UI). 패널 방식을 egui 네이티브 창으로 확정하고 관련 절(§1, §3.1, §5.1, §5.3, §5.6~5.9, §6, §9, §11) 갱신.
 - **2026-09-26 (P1 완료)**: `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `.github/workflows/docs-bundle.yml`, `README.md` 작성. v1.52.0 실측으로 사실 F15~F21 추가, §4.1/§4.1.1/§4.1.2 갱신, 신규 리스크 G1~G3 등록. **site 번들이 344MB(스킬 필수분 1.8MB)임을 확인** — 대안 크기 측정치를 §4.1.2에 기록.
+- **2026-09-26 (Windows 안내 및 임베디드 검증)**: CI 스모크 테스트가 `--docs-dir`만 써서 **Windows에서 "exe 단독 서빙" 경로가 미검증**이었다. `build-app.yml`에 "번들·`--docs-dir` 없이 빈 캐시로 서빙" 스텝을 추가 → **3개 플랫폼 모두 `unique page links: 61`** 확인. (스텝 구현 중 맵 링크 정규식이 줄 시작을 요구해 카운트가 0으로 나오던 버그를 발견해 수정.) README에 플랫폼별 시작 안내(Windows: 콘솔 창 동반, `--headless`, `service install`, 방화벽, SmartScreen) 추가.
 - **2026-09-26 (단일 파일 배포)**: 사용자 요구("exe 하나면 되는 것")에 따라 문서를 **바이너리에 내장**했다. `src/embedded`(760KB, 61페이지)를 `include_dir!`로 컴파일 시 포함 → 다운로드 없이 서빙. 해석 순서는 `--docs-dir` > `--docs-version` > 캐시 > **내장**. `fetch --variant lean|site`(기본 lean 190KB) 추가. 릴리즈에 lean(190KB) + site(344MB) + 실행파일 3종을 함께 발행. **주의: site 344MB는 HTML 브라우징(블로그 이미지·동영상) 전용이며 스킬 기능에는 불필요.**
 - **2026-09-26 (내장 크기 사고와 가드)**: CI의 embed 단계가 `find ... | head -1`로 번들을 골라, **Linux/macOS는 site(360MB)를 내장해 330MB 바이너리**가 나왔다(Windows는 lean을 골라 정상). 재현 후 수정: `*-lean.tar.gz`를 명시 선택, `embed-docs.sh`가 32MB 초과 번들을 **거부**, 단위 테스트가 내장 문서 4MB 상한을 검사, CI가 **바이너리 64MB 상한**을 검사. 수정 후 24/17/15MB.
 - **2026-09-26 (릴리즈 구조 변경)**: 릴리즈를 **goose 버전 기준 하나로 통합**했다. `release.yml`이 `docs-bundle.yml`을 흡수해 번들과 3개 실행 파일을 같은 태그(`v<goose_version>`)에 발행한다. `resolve` 잡이 기존 릴리즈를 확인해 **skip**하므로 1일 6회 실행에도 번들을 재빌드하지 않는다. 워크플로 3→2개. `fetch`의 릴리즈 태그도 `docs-v<ver>`→`v<ver>`로 변경. 실측: `v1.52.0` 릴리즈에 번들+실행파일 3종+SHA256SUMS, fetch/서빙/크롤링 통과, 재실행 시 `already exists; nothing to do.`
@@ -656,7 +657,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | **버전 선택 로직** | ✅ 미지정 → 최신(1.52.0), `--docs-version 1.51.0` → 1.51.0, `v1.51.0` 접두사 허용 |
 | **버전별 문서 차이 반영** | ✅ 서빙된 map sha가 버전별로 다름(1.51.0 `4e1a6b95…` / 1.52.0 `0df3aada…`). 1.52.0에 `Z.AI Coding Plan` 항목 추가 확인 |
 | 미출시 버전 요청 | ✅ `release docs-v1.99.0 not found … set GH_TOKEN` (명확한 안내) |
-| **cron 실제 실행 이력** | ⏳ `event=schedule` 실행 0건 — 워크플로 생성(09:29 KST)이 cron 시각을 지나지 않았다. 다음 시각 04:00 UTC(13:00 KST) 이후 확인 필요 |
+| **cron 실제 실행 이력** | ✅ **자동 실행 확인** — `2026-09-26T04:20:11Z` `event=schedule` 실행이 `success` (예정 04:00 UTC / 13:00 KST). `total_count: 1` |
 
 **cron 잔여 확인 방법**: `gh api "repos/soolmuk/goose-doc/actions/workflows/docs-bundle.yml/runs?event=schedule" --jq '.total_count'` 가 1 이상이면 자동 실행이 동작한 것이다. GitHub은 저장소 활동이 장기간 없으면 scheduled 워크플로를 비활성화하므로, 주기적으로 이 값과 워크플로 `state`를 확인한다.
 

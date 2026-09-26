@@ -79,6 +79,52 @@ Structural checks always run; `--offline` additionally runs `goose run` with
 `GOOSE_DOCS_ROOT` pointed at the extracted bundle, proving the skill reads it
 from disk with no network access.
 
+## Getting started on each platform
+
+Download the binary for your platform from the release for your goose version
+(for example `v1.52.0`). Nothing else is needed: the documentation is inside the
+binary.
+
+| platform | download |
+|---|---|
+| Windows x86_64 | `goose-doc-windows-x86_64.exe` |
+| Linux x86_64 | `goose-doc-linux-x86_64` |
+| macOS arm64 | `goose-doc-macos-arm64` |
+
+Verify the download against `SHA256SUMS` before running it.
+
+### Windows
+
+1. Download `goose-doc-windows-x86_64.exe`.
+2. Run it. A panel window opens, with a console window behind it (the program
+   prints status to the console as well). Set the bind address and port, then
+   press **Start**.
+3. The panel shows the URL other machines should use, and a **Copy** button for
+   the `GOOSE_DOCS_ROOT=...` line.
+
+To run it without a window, for a machine that only serves:
+
+```powershell
+.\goose-doc-windows-x86_64.exe --headless --port 10650
+```
+
+Run it as a background service that starts on boot:
+
+```powershell
+# prints the sc.exe commands it would run
+.\goose-doc-windows-x86_64.exe service install --docs-dir C:\goose-docs
+
+# run as Administrator to apply
+.\goose-doc-windows-x86_64.exe service install --apply --start --docs-dir C:\goose-docs
+```
+
+Windows will ask whether to allow the program through the firewall the first
+time it listens on all interfaces. Allow it on private networks so other
+machines can reach the docs.
+
+SmartScreen may warn about an unsigned download: choose **More info**, then
+**Run anyway**.
+
 ## Automation
 
 `.github/workflows/release.yml` runs 6 times a day. For each goose release it
