@@ -79,9 +79,6 @@ pub fn plan(settings: &Settings, docs_dir: &Path, bin: &Path, port: u16) -> Resu
         .collect::<Vec<_>>()
         .join(" ");
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let hostname = hostname();
-
     #[cfg(target_os = "linux")]
     {
         let system = is_root();
@@ -133,6 +130,7 @@ pub fn plan(settings: &Settings, docs_dir: &Path, bin: &Path, port: u16) -> Resu
 
     #[cfg(target_os = "macos")]
     {
+        let hostname = hostname();
         let location = config_home()
             .join("LaunchAgents")
             .join(format!("com.goose-doc.{hostname}.plist"));
@@ -202,7 +200,7 @@ pub fn plan(settings: &Settings, docs_dir: &Path, bin: &Path, port: u16) -> Resu
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        let _ = (hostname, args);
+        let _ = args;
         anyhow::bail!("service installation is not supported on this platform")
     }
 }
@@ -358,6 +356,7 @@ fn run_shell(command_line: &str) -> Result<String> {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
