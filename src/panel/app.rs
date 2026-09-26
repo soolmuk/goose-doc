@@ -7,7 +7,9 @@
 use eframe::egui;
 use std::time::{Duration, Instant};
 
-use super::{bind_choices, client_hint, validate, Command, Panel, PanelState, Reach};
+use super::{
+    bind_choices, client_hint, describe_docs_location, validate, Command, Panel, PanelState, Reach,
+};
 
 pub struct PanelApp {
     panel: Panel,
@@ -149,14 +151,10 @@ impl PanelApp {
                     ui.end_row();
 
                     ui.label("Docs root");
-                    ui.label(
-                        self.panel
-                            .settings
-                            .docs_dir
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "cached bundle".to_string()),
-                    );
+                    ui.label(describe_docs_location(
+                        self.panel.settings.docs_dir.as_deref(),
+                        self.panel.settings.docs_version.as_deref(),
+                    ));
                     ui.end_row();
 
                     ui.label("Open browser");

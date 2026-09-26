@@ -581,7 +581,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 - **2026-09-26**: P0 확정(포트 10650, 번들 `site` 단일, 릴리즈 자산 배포, cron 1일 6회, macOS aarch64만, 영어 UI). 패널 방식을 egui 네이티브 창으로 확정하고 관련 절(§1, §3.1, §5.1, §5.3, §5.6~5.9, §6, §9, §11) 갱신.
 - **2026-09-26 (P1 완료)**: `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `.github/workflows/docs-bundle.yml`, `README.md` 작성. v1.52.0 실측으로 사실 F15~F21 추가, §4.1/§4.1.1/§4.1.2 갱신, 신규 리스크 G1~G3 등록. **site 번들이 344MB(스킬 필수분 1.8MB)임을 확인** — 대안 크기 측정치를 §4.1.2에 기록.
-- **2026-09-26 (Windows 안내 및 임베디드 검증)**: CI 스모크 테스트가 `--docs-dir`만 써서 **Windows에서 "exe 단독 서빙" 경로가 미검증**이었다. `build-app.yml`에 "번들·`--docs-dir` 없이 빈 캐시로 서빙" 스텝을 추가 → **3개 플랫폼 모두 `unique page links: 61`** 확인. (스텝 구현 중 맵 링크 정규식이 줄 시작을 요구해 카운트가 0으로 나오던 버그를 발견해 수정.) README에 플랫폼별 시작 안내(Windows: 콘솔 창 동반, `--headless`, `service install`, 방화벽, SmartScreen) 추가.
+- **2026-09-26 (Windows 단일 exe 실패 → 패널 내장 폴백 누락 수정)**: 사용자가 배포된 `goose-doc-windows-x86_64.exe`를 실행해 **Start를 눌렀으나 실패**했다: `no docs bundles in C:\Users\...\AppData\Local\goose-doc\bundles. Run \`goose-doc fetch <version>\` or pass --docs-dir.` **원인은 환경이 아니라 코드다.** P2에서 `docs::resolve(..., allow_embedded)`를 도입하며 `main.rs`의 서브 경로(`--headless`, `doctor`)만 내장 폴백을 쓰도록 바꾸고, **패널은 옛 `resolve_cached` 직접 호출을 그대로 두었다**(`panel/mod.rs::resolve_docs`). 그 결과 **다운로드한 exe 하나로는 Start가 절대 성공할 수 없었다** — `--docs-dir`도 없고 캐시도 비어 있고, 내장 사본은 조회되지 않았다. `--headless`만 동작했기 때문에 CI(§10.3의 "빈 캐시 서빙" 스텝은 `--headless` 사용)와 로컬 검증이 이 경로를 **전부 비껴갔다**. 수정: 패널이 `docs::resolve(.., true)`를 호출하도록 통일하고, 패널 상태 모델에 **GUI 없이 검증 가능한 회귀 테스트 2건**을 추가 — (1) 빈 캐시·`--docs-dir` 없음에서 Start가 내장 문서로 서빙, (2) Start 후 **맵과 맵이 나열한 61개 페이지를 전부 HTTP로 조회해 200 확인 + 없는 경로는 404**. 부수 수정: 패널 Docs root 라벨이 실제와 무관하게 "cached bundle"로 표시되던 것을 `describe_docs_location`으로 교체(빈 캐시에서 "embedded in the binary (1.52.0)"), `doctor`가 내장 사본일 때 `GOOSE_DOCS_ROOT=`(빈 값)을 출력하던 것을 안내 문구로 교체. **교훈: 대체 해석 경로를 추가할 때는 그 경로를 쓰는 모든 진입점을 함께 점검한다. 사용자가 클릭하는 경로(패널)가 CI가 검증하는 경로(--headless)와 다르면 CI는 아무것도 보증하지 않는다.** CI 스모크 테스트가 `--docs-dir`만 써서 **Windows에서 "exe 단독 서빙" 경로가 미검증**이었다. `build-app.yml`에 "번들·`--docs-dir` 없이 빈 캐시로 서빙" 스텝을 추가 → **3개 플랫폼 모두 `unique page links: 61`** 확인. (스텝 구현 중 맵 링크 정규식이 줄 시작을 요구해 카운트가 0으로 나오던 버그를 발견해 수정.) README에 플랫폼별 시작 안내(Windows: 콘솔 창 동반, `--headless`, `service install`, 방화벽, SmartScreen) 추가.
 - **2026-09-26 (단일 파일 배포)**: 사용자 요구("exe 하나면 되는 것")에 따라 문서를 **바이너리에 내장**했다. `src/embedded`(760KB, 61페이지)를 `include_dir!`로 컴파일 시 포함 → 다운로드 없이 서빙. 해석 순서는 `--docs-dir` > `--docs-version` > 캐시 > **내장**. `fetch --variant lean|site`(기본 lean 190KB) 추가. 릴리즈에 lean(190KB) + site(344MB) + 실행파일 3종을 함께 발행. **주의: site 344MB는 HTML 브라우징(블로그 이미지·동영상) 전용이며 스킬 기능에는 불필요.**
 - **2026-09-26 (내장 크기 사고와 가드)**: CI의 embed 단계가 `find ... | head -1`로 번들을 골라, **Linux/macOS는 site(360MB)를 내장해 330MB 바이너리**가 나왔다(Windows는 lean을 골라 정상). 재현 후 수정: `*-lean.tar.gz`를 명시 선택, `embed-docs.sh`가 32MB 초과 번들을 **거부**, 단위 테스트가 내장 문서 4MB 상한을 검사, CI가 **바이너리 64MB 상한**을 검사. 수정 후 24/17/15MB.
 - **2026-09-26 (릴리즈 구조 변경)**: 릴리즈를 **goose 버전 기준 하나로 통합**했다. `release.yml`이 `docs-bundle.yml`을 흡수해 번들과 3개 실행 파일을 같은 태그(`v<goose_version>`)에 발행한다. `resolve` 잡이 기존 릴리즈를 확인해 **skip**하므로 1일 6회 실행에도 번들을 재빌드하지 않는다. 워크플로 3→2개. `fetch`의 릴리즈 태그도 `docs-v<ver>`→`v<ver>`로 변경. 실측: `v1.52.0` 릴리즈에 번들+실행파일 3종+SHA256SUMS, fetch/서빙/크롤링 통과, 재실행 시 `already exists; nothing to do.`
@@ -640,6 +640,15 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 **교훈**: `#[cfg]`로 변수를 조건부 선언하지 말고, 조건부 로직을 분리해 전 플랫폼에서 컴파일·테스트한다.
 
+### 사용자 실행에서 발견된 결함 (CI가 검증하지 않는 경로)
+
+**D5. 패널의 Start가 내장 문서를 찾지 못함 — 배포된 exe 단독 실행이 불가능**
+- 배포된 `goose-doc-windows-x86_64.exe`에서 **Start 클릭 시 실패**: `no docs bundles in ...\bundles. Run \`goose-doc fetch <version>\` or pass --docs-dir.`
+- 원인: 내장 폴백(`docs::resolve(.., true)`)을 `--headless`/`doctor` 경로에만 연결하고 **패널은 캐시 전용 해석을 그대로 유지**했다. 즉 **exe 하나만 받은 사용자가 누르는 버튼이 유일하게 실패하는 경로**였다.
+- **왜 CI가 놓쳤나**: §10.3의 "빈 캐시 서빙" 스텝과 `--headless` 검증은 모두 **패널을 거치지 않는다**. 게다가 로컬 P3 GUI 검증은 `--docs-dir`(픽스처)로 했기 때문에 캐시·내장 해석 자체를 타지 않았다. **사용자의 클릭 경로와 CI의 검증 경로가 달랐던 것이 근본 원인**이다.
+- 수정: 패널도 `docs::resolve(.., true)`를 쓰도록 통일. 회귀 테스트 2건을 **GUI 없이** 추가(빈 캐시에서 Start → 내장 서빙 / Start 후 맵 + 맵이 나열한 61개 페이지 전부 HTTP 200, 없는 경로 404). CI의 "빈 캐시" 스텝도 **패널 상태 기계를 직접 구동**하도록 추가해 같은 부류가 다시 나오지 않게 했다.
+- **교훈**: 사용자가 실제로 누르는 경로가 CI가 두드리는 경로와 같아야 한다. 대체 해석 경로(내장/캐시/명시)를 추가하면 **모든 진입점**(패널·`--headless`·`doctor`·`service`)을 함께 점검한다.
+
 **다음 단계**: Windows/macOS의 컴파일 문제는 이 구조 변경으로 해소됐고, 3개 플랫폼이 green이다.
 
 ---
@@ -659,7 +668,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | 미출시 버전 요청 | ✅ `release docs-v1.99.0 not found … set GH_TOKEN` (명확한 안내) |
 | **cron 실제 실행 이력** | ✅ **자동 실행 확인** — `2026-09-26T04:20:11Z` `event=schedule` 실행이 `success` (예정 04:00 UTC / 13:00 KST). `total_count: 1` |
 
-**cron 잔여 확인 방법**: `gh api "repos/soolmuk/goose-doc/actions/workflows/docs-bundle.yml/runs?event=schedule" --jq '.total_count'` 가 1 이상이면 자동 실행이 동작한 것이다. GitHub은 저장소 활동이 장기간 없으면 scheduled 워크플로를 비활성화하므로, 주기적으로 이 값과 워크플로 `state`를 확인한다.
+**cron 잔여 확인 방법**: `gh api "repos/soolmuk/goose-doc/actions/workflows/release.yml/runs?event=schedule" --jq '.total_count'` 가 1 이상이면 자동 실행이 동작한 것이다. GitHub은 저장소 활동이 장기간 없으면 scheduled 워크플로를 비활성화하므로, 주기적으로 이 값과 워크플로 `state`를 확인한다.
 
 ---
 

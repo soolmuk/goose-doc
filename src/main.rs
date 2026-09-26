@@ -229,7 +229,16 @@ fn report(root: &DocsRoot) {
     println!("pages:     {}", root.entries);
     println!("map:       {}", root.map_path());
     println!();
-    println!("GOOSE_DOCS_ROOT={}", root.path.display());
+
+    match root.path_on_disk() {
+        Some(path) => println!("GOOSE_DOCS_ROOT={}", path.display()),
+        // The embedded copy has no filesystem path; what a client uses is the
+        // URL of a running server.
+        None => println!(
+            "GOOSE_DOCS_ROOT points here only once a server is running: \
+             start goose-doc and use the URL it prints."
+        ),
+    }
 }
 
 /// Service management. The docs root is resolved first so the unit references a

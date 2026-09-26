@@ -102,6 +102,11 @@ Verify the download against `SHA256SUMS` before running it.
 3. The panel shows the URL other machines should use, and a **Copy** button for
    the `GOOSE_DOCS_ROOT=...` line.
 
+Nothing else is needed and nothing is downloaded: the 61 pages the skill reads
+are inside the executable, so **Start** works offline and on a machine that has
+never seen a bundle. The docs root line in the panel reads *embedded in the
+binary* in that case.
+
 To run it without a window, for a machine that only serves:
 
 ```powershell

@@ -113,6 +113,10 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      # The Start button in the panel resolves the docs root through the panel
+      # state model, not through --headless. The tests below drive that model
+      # with an empty cache on every platform, so a regression there fails the
+      # build instead of the user's first click.
       - name: Test
         run: cargo test --target ${{ matrix.target }}
 
@@ -125,6 +129,11 @@ jobs:
       # The shipped binary embeds the docs, so confirm that a build with no
       # downloaded bundle and no --docs-dir still serves. This is the path a
       # user takes when they download only the executable.
+      #
+      # This deliberately drives the panel state machine rather than --headless:
+      # the panel is what the Start button calls, and a bug where only the
+      # headless path could see the embedded docs shipped once because CI never
+      # exercised the panel's resolution.
       - name: Serves embedded docs with no bundle
         shell: bash
         run: |
@@ -158,6 +167,12 @@ jobs:
 
           kill "$PID" 2>/dev/null || true
           echo "embedded docs OK"
+
+      # The Start button in the panel resolves the docs root through the panel
+      # state model, not through --headless. Drive that model directly with an
+      # empty cache so a regression here fails the build rather than the user.
+      - name: Panel starts from an empty cache
+        run: cargo test --target ${{ matrix.target }} --lib -- panel::tests::starting_from_an_empty_cache_serves_the_whole_map panel::tests::embedded_copy_is_served_when_no_bundle_is_available
 
       # A window cannot be opened on a headless runner, so confirm the panel
       # path degrades to headless instead of failing. Linux is the platform

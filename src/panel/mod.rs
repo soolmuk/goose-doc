@@ -1,7 +1,7 @@
 //! Panel state, kept free of any egui dependency so it can be tested without a
 //! window. The egui layer in `app` only renders this and forwards input.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::addr;
@@ -118,8 +118,17 @@ impl Panel {
     }
 
     /// Resolve the docs root the current settings point at.
+    ///
+    /// Mirrors the serve path, including the embedded fallback. Without that
+    /// fallback a freshly downloaded executable could never start: it has no
+    /// `--docs-dir`, no bundle in the cache, and yet carries the docs.
     pub fn docs_root(&self) -> anyhow::Result<docs::DocsRoot> {
-        resolve_docs(&self.settings, &self.cache_root)
+        docs::resolve(
+            self.settings.docs_dir.as_deref(),
+            self.settings.docs_version.as_deref(),
+            &self.cache_root,
+            true,
+        )
     }
 
     pub fn apply(&mut self, command: Command) {
@@ -204,10 +213,10 @@ fn status_of(running: &RunningServer) -> Status {
         listening: running.addr.to_string(),
         docs_version: running.docs_version.clone(),
         docs_pages: running.docs_entries,
-        docs_path: match &running.docs_path {
-            Some(path) => path.display().to_string(),
-            None => "embedded in the binary".to_string(),
-        },
+        docs_path: describe_docs_location(
+            running.docs_path.as_deref(),
+            running.docs_version.as_deref(),
+        ),
         reach: if addr::is_any(&running.addr.ip()) {
             Reach::Network
         } else if running.addr.ip().is_loopback() {
@@ -220,14 +229,13 @@ fn status_of(running: &RunningServer) -> Status {
     }
 }
 
-fn resolve_docs(
-    settings: &Settings,
-    cache_root: &std::path::Path,
-) -> anyhow::Result<docs::DocsRoot> {
-    match (&settings.docs_dir, &settings.docs_version) {
-        (Some(dir), _) => docs::validate(dir),
-        (None, Some(version)) => docs::resolve_version(cache_root, version),
-        (None, None) => docs::resolve_cached(cache_root),
+/// One-line description of where the docs are served from, for the panel.
+pub fn describe_docs_location(path: Option<&Path>, version: Option<&str>) -> String {
+    match (path, version) {
+        (Some(path), Some(version)) => format!("{version} at {}", path.display()),
+        (Some(path), None) => path.display().to_string(),
+        (None, Some(version)) => format!("embedded in the binary ({version})"),
+        (None, None) => "embedded in the binary".to_string(),
     }
 }
 
@@ -322,6 +330,106 @@ mod tests {
         s.docs_dir = Some(fixture_root());
         s.port = 0;
         Panel::new(s, temp_settings_path(name), std::env::temp_dir())
+    }
+
+    /// A panel with no explicit docs root and an empty cache: exactly the state
+    /// of a freshly downloaded executable, which must fall back to the docs
+    /// embedded in the binary.
+    fn panel_with_empty_cache(name: &str) -> Panel {
+        let settings_path = temp_settings_path(name);
+        let cache_root = settings_path.parent().unwrap().to_path_buf();
+        let mut s = settings();
+        // Port 0 so parallel tests never contend, and to keep the panel free of
+        // any service already bound to the default port on this machine.
+        s.port = 0;
+        Panel::new(s, settings_path, cache_root)
+    }
+
+    #[test]
+    fn embedded_copy_is_served_when_no_bundle_is_available() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+
+        let mut panel = panel_with_empty_cache("embedded");
+        panel.apply(Command::Start);
+
+        match &panel.state {
+            PanelState::Running(status) => {
+                assert_eq!(status.docs_pages, crate::embedded::entries());
+                assert!(status.docs_pages > 0, "the binary embedded no docs");
+                assert_eq!(status.docs_version, crate::embedded::version());
+                assert!(
+                    status.docs_path.contains("embedded"),
+                    "got: {}",
+                    status.docs_path
+                );
+            }
+            other => panic!("expected running from the embedded docs, got {other:?}"),
+        }
+
+        panel.apply(Command::Stop);
+    }
+
+    /// The exact flow of the Start button with an empty cache: start, then read
+    /// the map and every path it names over HTTP.
+    #[test]
+    fn starting_from_an_empty_cache_serves_the_whole_map() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+
+        let mut panel = panel_with_empty_cache("emptycache-http");
+        panel.apply(Command::Start);
+
+        let url = match &panel.state {
+            PanelState::Running(status) => status.url.clone(),
+            other => panic!("expected running, got {other:?}"),
+        };
+
+        runtime.block_on(async {
+            let client = reqwest::Client::new();
+
+            let map = client
+                .get(format!("{url}/goose-docs-map.md"))
+                .send()
+                .await
+                .expect("map request");
+            assert_eq!(map.status(), 200);
+            let map = map.text().await.expect("map body");
+
+            let entries = docs::map_entries(&map);
+            assert!(entries.len() > 10, "only {} map entries", entries.len());
+
+            for entry in &entries {
+                let response = client
+                    .get(format!("{url}/{entry}"))
+                    .send()
+                    .await
+                    .unwrap_or_else(|error| panic!("{entry}: {error}"));
+                assert_eq!(response.status(), 200, "{entry} was not served");
+            }
+
+            let missing = client
+                .get(format!("{url}/docs/nope.md"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(missing.status(), 404);
+        });
+
+        panel.apply(Command::Stop);
+    }
+
+    #[test]
+    fn missing_docs_location_is_described_for_the_panel() {
+        assert_eq!(
+            describe_docs_location(None, Some("1.52.0")),
+            "embedded in the binary (1.52.0)"
+        );
+        assert_eq!(describe_docs_location(None, None), "embedded in the binary");
+        assert_eq!(
+            describe_docs_location(Some(Path::new("/opt/goose-docs")), Some("1.52.0")),
+            "1.52.0 at /opt/goose-docs"
+        );
     }
 
     #[test]
