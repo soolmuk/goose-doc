@@ -78,26 +78,43 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Build bundle
+      - name: Build bundles
         run: |
           set -euo pipefail
           ./tools/build-docs-bundle.sh "${{ needs.resolve.outputs.tag }}" --out-dir ./out
+          # The lean bundle is what gets embedded in the binaries and what
+          # `fetch` downloads by default: it is ~200 KB versus ~344 MB.
+          ./tools/build-lean-bundle.sh "${{ needs.resolve.outputs.version }}" \
+            --build-dir /tmp/site --out "./out/goose-docs-${{ needs.resolve.outputs.version }}-lean.tar.gz" 2>/dev/null || {
+            # build-lean-bundle.sh builds the site itself when given no build dir
+            mkdir -p /tmp/site
+            tar xzf "./out/goose-docs-${{ needs.resolve.outputs.version }}.tar.gz" -C /tmp/site
+            ./tools/build-lean-bundle.sh "${{ needs.resolve.outputs.version }}" \
+              --build-dir /tmp/site \
+              --out "./out/goose-docs-${{ needs.resolve.outputs.version }}-lean.tar.gz"
+          }
+          ls -la ./out
 
-      - name: Upload bundle
+      - name: Upload bundles
         uses: actions/upload-artifact@v7.0.1
         with:
           name: docs-bundle
-          path: ./out/goose-docs-${{ needs.resolve.outputs.version }}.tar.gz*
+          path: ./out/goose-docs-${{ needs.resolve.outputs.version }}*.tar.gz*
           if-no-files-found: error
           retention-days: 7
 
   app:
     name: Build app
-    needs: resolve
+    # The app embeds the bundle, so the bundle must be built (and uploaded as an
+    # artifact) before the app jobs start.
+    needs: [resolve, bundle]
     if: needs.resolve.outputs.skip != 'true'
     uses: ./.github/workflows/build-app.yml
     with:
       upload_artifacts: true
+      # Embed the bundle built for this version, so the binaries carry docs
+      # that match the release rather than the committed copy.
+      docs_bundle_artifact: docs-bundle
 
   publish:
     name: Publish release
@@ -128,7 +145,9 @@ jobs:
           ls -la dist
 
           BUNDLE="goose-docs-${{ needs.resolve.outputs.version }}.tar.gz"
+          LEAN="goose-docs-${{ needs.resolve.outputs.version }}-lean.tar.gz"
           test -f "dist/$BUNDLE" || { echo "missing $BUNDLE" >&2; exit 1; }
+          test -f "dist/$LEAN" || { echo "missing $LEAN" >&2; exit 1; }
 
           ENTRIES="$(jq -r '.entries' "dist/$BUNDLE.manifest.json")"
           BYTES="$(jq -r '.bytes' "dist/$BUNDLE.manifest.json")"
@@ -165,18 +184,20 @@ jobs:
             "" \
             "| asset | what it is |" \
             "|---|---|" \
-            "| \`goose-docs-$VERSION.tar.gz\` | docs root: \`goose-docs-map.md\` + \`docs/**\` |" \
-            "| \`goose-doc-linux-x86_64\` | server, Linux x86_64 |" \
-            "| \`goose-doc-macos-arm64\` | server, macOS arm64 |" \
-            "| \`goose-doc-windows-x86_64.exe\` | server, Windows x86_64 |" \
+            "| \`goose-doc-*\` | the server; the documentation is embedded, so this file alone is enough |" \
+            "| \`goose-docs-$VERSION-lean.tar.gz\` | the same docs as a small bundle (~200 KB) |" \
+            "| \`goose-docs-$VERSION.tar.gz\` | full docs root with blog images and videos, for browsing the HTML site |" \
             "" \
             "Docs bundle: $ENTRIES pages, $SIZE_MB MB, sha256 \`$SHA\`." \
             "" \
             "## Use it" \
             "" \
             "\`\`\`sh" \
-            "# download the docs bundle, then serve it" \
-            "goose-doc fetch $VERSION" \
+            "# a single binary is enough: the docs are embedded" \
+            "goose-doc --port 10650" \
+            "" \
+            "# to serve the full HTML site instead, fetch the site bundle" \
+            "goose-doc fetch $VERSION --variant site" \
             "goose-doc --port 10650" \
             "" \
             "# or point goose at a running server" \

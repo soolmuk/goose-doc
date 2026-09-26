@@ -26,7 +26,8 @@ pub struct Status {
     pub listening: String,
     pub docs_version: Option<String>,
     pub docs_pages: usize,
-    pub docs_path: PathBuf,
+    /// Human-readable location of the docs: a path, or "embedded".
+    pub docs_path: String,
     pub reach: Reach,
     pub uptime: Duration,
     pub requests: u64,
@@ -203,7 +204,10 @@ fn status_of(running: &RunningServer) -> Status {
         listening: running.addr.to_string(),
         docs_version: running.docs_version.clone(),
         docs_pages: running.docs_entries,
-        docs_path: running.docs_path.clone(),
+        docs_path: match &running.docs_path {
+            Some(path) => path.display().to_string(),
+            None => "embedded in the binary".to_string(),
+        },
         reach: if addr::is_any(&running.addr.ip()) {
             Reach::Network
         } else if running.addr.ip().is_loopback() {
@@ -290,7 +294,7 @@ mod tests {
             listening: "0.0.0.0:10650".to_string(),
             docs_version: Some("1.52.0".to_string()),
             docs_pages: 61,
-            docs_path: PathBuf::from("/opt/goose-docs"),
+            docs_path: "/opt/goose-docs".to_string(),
             reach: Reach::Network,
             uptime: Duration::from_secs(5),
             requests: 3,

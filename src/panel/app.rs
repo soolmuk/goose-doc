@@ -232,7 +232,7 @@ impl PanelApp {
                 ui.end_row();
 
                 ui.label("Docs root");
-                ui.monospace(status.docs_path.display().to_string());
+                ui.monospace(&status.docs_path);
                 ui.end_row();
 
                 ui.label("Uptime");

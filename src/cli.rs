@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::addr::{DEFAULT_BIND, LOOPBACK};
 use crate::config::DEFAULT_PORT;
+use crate::docs::Variant;
 
 /// Where `goose-doc fetch` looks for bundles. Override with --base-url when
 /// bundles are mirrored elsewhere.
@@ -85,6 +86,10 @@ pub enum Command {
         /// Token for a private repository. Defaults to GH_TOKEN or GITHUB_TOKEN.
         #[arg(long, env = "GOOSE_DOC_GITHUB_TOKEN", hide_env_values = true)]
         token: Option<String>,
+        /// Which bundle to download: lean (~200 KB, what the skill reads) or
+        /// site (~344 MB, adds blog images and videos for browsing).
+        #[arg(long, value_enum, default_value_t = VariantArg::Lean)]
+        variant: VariantArg,
     },
     /// Show what goose-doc would serve and whether the docs root is valid.
     Doctor {
@@ -120,6 +125,22 @@ pub enum Command {
         #[arg(long)]
         cache_dir: Option<PathBuf>,
     },
+}
+
+/// Bundle size choice on the command line.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantArg {
+    Lean,
+    Site,
+}
+
+impl From<VariantArg> for Variant {
+    fn from(value: VariantArg) -> Self {
+        match value {
+            VariantArg::Lean => Variant::Lean,
+            VariantArg::Site => Variant::Site,
+        }
+    }
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +203,24 @@ mod tests {
         let cli = Cli::parse_from(["goose-doc", "fetch", "v1.52.0"]);
         match cli.command {
             Some(Command::Fetch { version, .. }) => assert_eq!(version, "v1.52.0"),
+            other => panic!("expected fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_defaults_to_the_lean_bundle() {
+        let cli = Cli::parse_from(["goose-doc", "fetch", "1.52.0"]);
+        match cli.command {
+            Some(Command::Fetch { variant, .. }) => assert_eq!(variant, VariantArg::Lean),
+            other => panic!("expected fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_can_request_the_site_bundle() {
+        let cli = Cli::parse_from(["goose-doc", "fetch", "1.52.0", "--variant", "site"]);
+        match cli.command {
+            Some(Command::Fetch { variant, .. }) => assert_eq!(variant, VariantArg::Site),
             other => panic!("expected fetch, got {other:?}"),
         }
     }

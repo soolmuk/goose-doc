@@ -14,6 +14,11 @@ on:
         required: false
         default: true
         type: boolean
+      docs_bundle_artifact:
+        description: "Artifact name of a docs bundle to embed (blank = use the committed copy)"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       upload_artifacts:
@@ -21,9 +26,15 @@ on:
         required: false
         default: true
         type: boolean
+      docs_bundle_artifact:
+        description: "Artifact name of a docs bundle to embed (blank = use the committed copy)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -68,6 +79,25 @@ jobs:
           sudo apt-get install -y \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libssl-dev
+
+      # The binary embeds the documentation, so a release binary must embed the
+      # bundle built for its own version rather than the committed copy, which
+      # is only a convenience for standalone builds.
+      - name: Download docs bundle to embed
+        if: inputs.docs_bundle_artifact != ''
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: ${{ inputs.docs_bundle_artifact }}
+          path: bundle
+
+      - name: Embed docs bundle
+        if: inputs.docs_bundle_artifact != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE="$(find bundle -name 'goose-docs-*.tar.gz' -type f | head -1)"
+          test -n "$BUNDLE" || { echo "no bundle found in ./bundle" >&2; exit 1; }
+          ./tools/embed-docs.sh "$BUNDLE"
 
       - name: Format check
         run: cargo fmt --check

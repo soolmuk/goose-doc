@@ -31,17 +31,47 @@ pub struct Manifest {
     pub entries: Option<usize>,
 }
 
-/// A docs root on disk that has been checked against the goose contract.
+/// The documentation to serve.
+///
+/// Either a docs root on disk or the copy embedded in the binary. Both satisfy
+/// the same contract, so callers do not need to care which one it is.
 #[derive(Debug, Clone)]
 pub struct DocsRoot {
+    /// Absolute path to the docs root. Empty when the embedded copy is used.
     pub path: PathBuf,
     pub entries: usize,
     pub version: Option<String>,
 }
 
 impl DocsRoot {
-    pub fn map_path(&self) -> PathBuf {
-        self.path.join("goose-docs-map.md")
+    /// A docs root backed by the documentation embedded in the binary.
+    ///
+    /// This is what makes a single executable enough to serve docs.
+    pub fn embedded() -> Self {
+        Self {
+            path: PathBuf::new(),
+            entries: crate::embedded::entries(),
+            version: crate::embedded::version(),
+        }
+    }
+
+    /// True when the documentation is the embedded copy rather than a directory.
+    pub fn is_embedded(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
+
+    /// The docs root on disk, if there is one.
+    pub fn path_on_disk(&self) -> Option<PathBuf> {
+        (!self.is_embedded()).then(|| self.path.clone())
+    }
+
+    /// Where the map lives, for display. Not a real path when embedded.
+    pub fn map_path(&self) -> String {
+        if self.is_embedded() {
+            "embedded://goose-docs-map.md".to_string()
+        } else {
+            self.path.join("goose-docs-map.md").display().to_string()
+        }
     }
 }
 
@@ -210,10 +240,32 @@ pub struct BundleSource {
     pub repo: Option<String>,
     /// Token for a private repository. Read from the environment when absent.
     pub token: Option<String>,
+    /// Which bundle to download.
+    pub variant: Variant,
+}
+
+/// How much of the documentation to download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    /// Only the pages the skill reads (~200 KB). Also what the binary embeds.
+    Lean,
+    /// The full site, including blog images and videos, for browsing in a
+    /// browser (~344 MB).
+    Site,
+}
+
+impl Variant {
+    /// Asset name suffix: the lean bundle is published with `-lean`.
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            Variant::Lean => "-lean",
+            Variant::Site => "",
+        }
+    }
 }
 
 impl BundleSource {
-    pub fn new(base_url: &str, token: Option<String>) -> Self {
+    pub fn new(base_url: &str, token: Option<String>, variant: Variant) -> Self {
         let repo = repo_from_release_base(base_url);
         // A blank token (for example an unset `--token ""` or an empty
         // environment variable) must not be sent, because GitHub answers 401.
@@ -224,6 +276,7 @@ impl BundleSource {
             base_url: base_url.trim_end_matches('/').to_string(),
             repo,
             token,
+            variant,
         }
     }
 }
@@ -254,13 +307,51 @@ fn token_from_env() -> Option<String> {
     None
 }
 
+/// Resolve what to serve, in order of preference:
+///
+/// 1. an explicit `--docs-dir`
+/// 2. an explicitly requested cached version
+/// 3. the newest usable cached bundle
+/// 4. the documentation embedded in the binary
+///
+/// Step 4 is what allows a single executable to serve docs with no download.
+/// Cached bundles win over the embedded copy because a downloaded site bundle
+/// also carries the assets the HTML site needs.
+pub fn resolve(
+    docs_dir: Option<&Path>,
+    docs_version: Option<&str>,
+    cache_root: &Path,
+    allow_embedded: bool,
+) -> Result<DocsRoot> {
+    let explicit = match (docs_dir, docs_version) {
+        (Some(dir), _) => Some(validate(dir)?),
+        (None, Some(version)) => Some(resolve_version(cache_root, version)?),
+        (None, None) => None,
+    };
+
+    if let Some(root) = explicit {
+        return Ok(root);
+    }
+
+    match resolve_cached(cache_root) {
+        Ok(root) => Ok(root),
+        Err(error) => {
+            if allow_embedded && crate::embedded::is_available() {
+                Ok(DocsRoot::embedded())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Download, verify, and extract a bundle.
 ///
 /// The archive is streamed to a temporary file and hashed as it arrives, so a
 /// multi-hundred-megabyte bundle is never held in memory.
 pub async fn fetch(cache_root: &Path, version: &str, source: &BundleSource) -> Result<DocsRoot> {
     let bare = version.trim_start_matches('v');
-    let bundle_name = format!("goose-docs-{bare}.tar.gz");
+    let bundle_name = format!("goose-docs-{bare}{}.tar.gz", source.variant.suffix());
     // One release per goose version, tagged with that version.
     let release_tag = format!("v{bare}");
 
@@ -269,25 +360,27 @@ pub async fn fetch(cache_root: &Path, version: &str, source: &BundleSource) -> R
         .build()
         .context("failed to build HTTP client")?;
 
-    let manifest_url = resolve_asset_url(
-        &client,
-        source,
-        &release_tag,
-        &format!("{bundle_name}.manifest.json"),
-    )
-    .await?;
     let bundle_url = resolve_asset_url(&client, source, &release_tag, &bundle_name).await?;
 
-    info!("fetching manifest from {manifest_url}");
-    let manifest_text = get_text(&client, &manifest_url, source).await?;
-    let manifest: Manifest =
-        serde_json::from_str(&manifest_text).context("failed to parse manifest")?;
-
-    // A private repository needs the asset API, which serves an octet-stream
-    // and needs the Accept header to return the bytes rather than metadata.
-    let bundle_request_url = match &source.repo {
-        Some(_) => bundle_url,
-        None => bundle_url,
+    // The manifest describes the site bundle: its checksum and page count.
+    // The lean bundle has no manifest, so it is verified against the release's
+    // SHA256SUMS. Either way the extracted pages are validated afterwards.
+    let manifest_name = format!("goose-docs-{bare}.tar.gz.manifest.json");
+    let expected_sha = if source.variant == Variant::Site {
+        let manifest_url = resolve_asset_url(&client, source, &release_tag, &manifest_name).await?;
+        info!("fetching manifest from {manifest_url}");
+        let manifest_text = get_text(&client, &manifest_url, source).await?;
+        let manifest: Manifest =
+            serde_json::from_str(&manifest_text).context("failed to parse manifest")?;
+        manifest.sha256
+    } else {
+        match fetch_release_checksum(&client, source, &release_tag, &bundle_name).await {
+            Ok(sha) => sha,
+            Err(error) => {
+                warn!("no checksum available for {bundle_name}: {error}");
+                String::new()
+            }
+        }
     };
 
     let dest = cache_root.join("bundles").join(bare);
@@ -297,31 +390,47 @@ pub async fn fetch(cache_root: &Path, version: &str, source: &BundleSource) -> R
     fs::create_dir_all(&dest).with_context(|| format!("failed to create {}", dest.display()))?;
 
     let staging = dest.with_extension("tar.gz.part");
-    info!("downloading {bundle_request_url}");
-    let (bytes_written, actual) =
-        download_to_file(&client, &bundle_request_url, &staging, source, &manifest).await?;
+    info!("downloading {bundle_url}");
+    let (bytes_written, actual) = download_to_file(&client, &bundle_url, &staging, source).await?;
 
-    if !actual.eq_ignore_ascii_case(&manifest.sha256) {
+    if !expected_sha.is_empty() && !actual.eq_ignore_ascii_case(&expected_sha) {
         let _ = fs::remove_file(&staging);
         bail!(
-            "bundle checksum mismatch for {bundle_name}: expected {}, got {actual} ({bytes_written} bytes)",
-            manifest.sha256
+            "bundle checksum mismatch for {bundle_name}: expected {expected_sha}, got {actual} ({bytes_written} bytes)"
         );
     }
 
     extract_tar_gz_file(&staging, &dest)?;
     let _ = fs::remove_file(&staging);
 
-    fs::write(
-        dest.join(format!("{bundle_name}.manifest.json")),
-        &manifest_text,
-    )
-    .with_context(|| format!("failed to write manifest into {}", dest.display()))?;
+    // A lean bundle carries only the pages, so the manifest is written here to
+    // make the version discoverable without a download.
+    if !dest.join("manifest.json").exists() {
+        let manifest = Manifest {
+            goose_version: bare.to_string(),
+            tag: Some(release_tag.clone()),
+            commit: None,
+            generated_at: None,
+            variant: Some(match source.variant {
+                Variant::Lean => "lean".to_string(),
+                Variant::Site => "site".to_string(),
+            }),
+            bundle: bundle_name.clone(),
+            bytes: Some(bytes_written),
+            sha256: actual.clone(),
+            map_sha256: None,
+            entries: None,
+        };
+        let text = serde_json::to_string_pretty(&manifest)?;
+        fs::write(dest.join("manifest.json"), text)
+            .with_context(|| format!("failed to write manifest into {}", dest.display()))?;
+    }
 
     let root = validate(&dest)?;
     info!(
-        "cached goose docs {} at {} ({} pages)",
+        "cached goose docs {} ({:?}) at {} ({} pages)",
         bare,
+        source.variant,
         root.path.display(),
         root.entries
     );
@@ -430,7 +539,6 @@ async fn download_to_file(
     url: &str,
     staging: &Path,
     source: &BundleSource,
-    manifest: &Manifest,
 ) -> Result<(u64, String)> {
     let mut request = client
         .get(url)
@@ -454,12 +562,6 @@ async fn download_to_file(
         );
     }
 
-    if let (Some(expected), Some(length)) = (manifest.bytes, response.content_length()) {
-        if expected != length {
-            warn!("manifest says {expected} bytes, server reports {length}");
-        }
-    }
-
     let mut file = tokio::fs::File::create(staging)
         .await
         .with_context(|| format!("failed to create {}", staging.display()))?;
@@ -481,6 +583,32 @@ async fn download_to_file(
         .context("failed to flush the bundle")?;
 
     Ok((written, hex::encode(hasher.finalize())))
+}
+
+/// Read one asset's checksum from the release's `SHA256SUMS`.
+///
+/// Releases carry a manifest only for the site bundle, so the lean bundle is
+/// verified this way.
+async fn fetch_release_checksum(
+    client: &reqwest::Client,
+    source: &BundleSource,
+    release_tag: &str,
+    asset_name: &str,
+) -> Result<String> {
+    let url = resolve_asset_url(client, source, release_tag, "SHA256SUMS").await?;
+    let body = get_text(client, &url, source).await?;
+
+    for line in body.lines() {
+        // Format: "<hex>  <name>" or "<hex> *<name>".
+        let mut parts = line.split_whitespace();
+        let Some(hash) = parts.next() else { continue };
+        let Some(name) = parts.next() else { continue };
+        if name.trim_start_matches('*') == asset_name {
+            return Ok(hash.to_string());
+        }
+    }
+
+    bail!("SHA256SUMS has no entry for {asset_name}")
 }
 
 /// True when a URL points at the GitHub REST API, which needs the JSON/octet
@@ -562,7 +690,8 @@ mod tests {
     fn validate_accepts_the_fixture_root() {
         let root = validate(&fixture_root()).expect("fixture root should validate");
         assert_eq!(root.entries, 2);
-        assert!(root.map_path().is_file());
+        assert!(!root.is_embedded());
+        assert!(Path::new(&root.map_path()).is_file());
     }
 
     #[test]
@@ -623,6 +752,46 @@ mod tests {
     }
 
     #[test]
+    fn resolve_prefers_an_explicit_directory() {
+        let dir = tempdir();
+        let root = resolve(Some(&fixture_root()), None, &dir, true).expect("explicit dir");
+        assert_eq!(root.path, fixture_root());
+        assert!(!root.is_embedded());
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_embedded_copy() {
+        let dir = tempdir();
+        let root = resolve(None, None, &dir, true).expect("embedded fallback");
+        assert!(root.is_embedded());
+        assert!(root.entries > 0);
+    }
+
+    #[test]
+    fn resolve_prefers_a_cached_bundle_over_the_embedded_copy() {
+        let dir = tempdir();
+        copy_dir(&fixture_root(), &dir.join("bundles").join("1.52.0"));
+
+        let root = resolve(None, None, &dir, true).expect("cached");
+        assert!(!root.is_embedded());
+        assert!(root.path.ends_with("1.52.0"));
+    }
+
+    #[test]
+    fn resolve_can_refuse_the_embedded_copy() {
+        let dir = tempdir();
+        let error = resolve(None, None, &dir, false).unwrap_err().to_string();
+        assert!(error.contains("no docs bundles"), "got: {error}");
+    }
+
+    #[test]
+    fn embedded_root_reports_a_descriptive_map_path() {
+        let root = DocsRoot::embedded();
+        assert!(root.map_path().starts_with("embedded://"));
+        assert!(root.path_on_disk().is_none());
+    }
+
+    #[test]
     fn hex_digest_matches_a_known_value() {
         let mut hasher = Sha256::new();
         hasher.update(b"abc");
@@ -655,6 +824,7 @@ mod tests {
             base_url: "https://github.com/soolmuk/goose-doc/releases/download".to_string(),
             repo: Some("soolmuk/goose-doc".to_string()),
             token: None,
+            variant: Variant::Lean,
         };
         assert!(resolve_asset_url_sync(&source, "v1.52.0", "x.tar.gz").contains("/repos/"));
         let _ = dir;
@@ -666,11 +836,18 @@ mod tests {
             base_url: "https://mirror.internal/goose".to_string(),
             repo: None,
             token: None,
+            variant: Variant::Site,
         };
         assert_eq!(
             resolve_asset_url_sync(&source, "v1.52.0", "x.tar.gz"),
             "https://mirror.internal/goose/v1.52.0/x.tar.gz"
         );
+    }
+
+    #[test]
+    fn variant_selects_the_asset_name() {
+        assert_eq!(Variant::Lean.suffix(), "-lean");
+        assert_eq!(Variant::Site.suffix(), "");
     }
 
     #[test]

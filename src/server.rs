@@ -25,7 +25,8 @@ pub struct RunningServer {
     pub started_at: Instant,
     pub docs_version: Option<String>,
     pub docs_entries: usize,
-    pub docs_path: PathBuf,
+    /// Docs root on disk, when one is in use. `None` means the embedded copy.
+    pub docs_path: Option<PathBuf>,
     pub requests: Arc<AtomicU64>,
     shutdown: Option<oneshot::Sender<()>>,
 }
@@ -58,7 +59,9 @@ impl RunningServer {
 
 #[derive(Clone)]
 struct AppState {
-    root: PathBuf,
+    /// Docs root on disk, when one is available. Preferred over the embedded
+    /// copy because it also carries the assets the HTML site needs.
+    root: Option<PathBuf>,
     requests: Arc<AtomicU64>,
 }
 
@@ -75,7 +78,7 @@ pub async fn start(docs: &DocsRoot, bind: &str, port: u16) -> Result<RunningServ
 
     let requests = Arc::new(AtomicU64::new(0));
     let state = AppState {
-        root: docs.path.clone(),
+        root: docs.path_on_disk(),
         requests: Arc::clone(&requests),
     };
 
@@ -124,7 +127,7 @@ pub async fn start(docs: &DocsRoot, bind: &str, port: u16) -> Result<RunningServ
         started_at: Instant::now(),
         docs_version: docs.version.clone(),
         docs_entries: docs.entries,
-        docs_path: docs.path.clone(),
+        docs_path: docs.path_on_disk(),
         requests,
         shutdown: Some(shutdown_tx),
     })
@@ -169,25 +172,41 @@ async fn serve_file(State(state): State<AppState>, uri: Uri) -> Response {
         return (StatusCode::FORBIDDEN, "path escapes the docs root").into_response();
     };
 
-    let mut target = state.root.join(&relative);
-    if target.is_dir() {
-        target = target.join("index.html");
+    // Prefer the on-disk root: it is a superset of the embedded pages.
+    if let Some(root) = &state.root {
+        let mut target = root.join(&relative);
+        if target.is_dir() {
+            target = target.join("index.html");
+        }
+        match tokio::fs::read(&target).await {
+            Ok(bytes) => {
+                return (
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static(content_type_for(&target)),
+                    )],
+                    bytes,
+                )
+                    .into_response()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                warn!("failed to read {}: {error}", target.display());
+                return (StatusCode::INTERNAL_SERVER_ERROR, "failed to read file").into_response();
+            }
+        }
     }
 
-    match tokio::fs::read(&target).await {
-        Ok(bytes) => (
+    match crate::embedded::get(&relative) {
+        Some(bytes) => (
             [(
                 header::CONTENT_TYPE,
-                HeaderValue::from_static(content_type_for(&target)),
+                HeaderValue::from_static(content_type_for(&relative)),
             )],
             bytes,
         )
             .into_response(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => not_found(&relative),
-        Err(error) => {
-            warn!("failed to read {}: {error}", target.display());
-            (StatusCode::INTERNAL_SERVER_ERROR, "failed to read file").into_response()
-        }
+        None => not_found(&relative),
     }
 }
 

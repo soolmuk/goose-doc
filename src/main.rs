@@ -56,9 +56,10 @@ async fn run_command(cli: Cli) -> Result<()> {
             base_url,
             cache_dir,
             token,
+            variant,
         }) => {
             let cache = cache_dir.clone().unwrap_or(cache);
-            let source = docs::BundleSource::new(base_url, token.clone());
+            let source = docs::BundleSource::new(base_url, token.clone(), (*variant).into());
             let root = docs::fetch(&cache, version, &source).await?;
             println!(
                 "{} ({} pages)\n{}",
@@ -194,7 +195,10 @@ fn run_panel(panel: Panel) -> Result<()> {
 fn print_started(running: &server::RunningServer) {
     println!("Serving goose docs at {}", running.url);
     println!("  listening: {}", running.addr);
-    println!("  docs root: {}", running.docs_path.display());
+    match &running.docs_path {
+        Some(path) => println!("  docs root: {}", path.display()),
+        None => println!("  docs root: embedded in the binary"),
+    }
     if let Some(version) = &running.docs_version {
         println!("  version:   {version} ({} pages)", running.docs_entries);
     }
@@ -209,21 +213,21 @@ fn resolve_docs(
     docs_version: Option<&str>,
     cache_root: &Path,
 ) -> Result<DocsRoot> {
-    match (docs_dir, docs_version) {
-        (Some(dir), _) => docs::validate(dir),
-        (None, Some(version)) => docs::resolve_version(cache_root, version),
-        (None, None) => docs::resolve_cached(cache_root),
-    }
+    docs::resolve(docs_dir, docs_version, cache_root, true)
 }
 
 fn report(root: &DocsRoot) {
-    println!("docs root: {}", root.path.display());
+    if root.is_embedded() {
+        println!("docs root: embedded in the binary");
+    } else {
+        println!("docs root: {}", root.path.display());
+    }
     match &root.version {
         Some(version) => println!("version:   {version}"),
         None => println!("version:   unknown (no manifest found)"),
     }
     println!("pages:     {}", root.entries);
-    println!("map:       {}", root.map_path().display());
+    println!("map:       {}", root.map_path());
     println!();
     println!("GOOSE_DOCS_ROOT={}", root.path.display());
 }

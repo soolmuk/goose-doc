@@ -8,6 +8,7 @@ pub mod addr;
 pub mod cli;
 pub mod config;
 pub mod docs;
+pub mod embedded;
 pub mod panel;
 pub mod server;
 pub mod service;
