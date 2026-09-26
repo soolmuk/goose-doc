@@ -154,8 +154,35 @@ jobs:
           SHA="$(jq -r '.sha256' "dist/$BUNDLE.manifest.json")"
           SIZE_MB="$(awk -v b="$BYTES" 'BEGIN { printf "%.1f", b/1048576 }')"
 
-          # One manifest covering every asset in the release.
-          (cd dist && cat ./*.sha256 > SHA256SUMS)
+          # One checksum file covering every published asset, so a consumer can
+          # verify whatever it downloads. `fetch` looks the bundle up in this
+          # file before extracting it, and the full site bundle is hundreds of
+          # megabytes, so an entry that is missing silently disables the check
+          # on exactly the downloads that most need it.
+          (
+            cd dist
+
+            # The .sha256 files are checksums themselves and SHA256SUMS is this
+            # file, so neither belongs in the list.
+            assets=()
+            for f in *; do
+              case "$f" in
+                SHA256SUMS|*.sha256) continue ;;
+              esac
+              assets+=("$f")
+            done
+
+            sha256sum "${assets[@]}" > SHA256SUMS
+            cat SHA256SUMS
+
+            # Every other asset must appear, so a new asset cannot be published
+            # unverified by accident.
+            for asset in "${assets[@]}"; do
+              grep -qE "[ *]$asset\$" SHA256SUMS \
+                || { echo "SHA256SUMS is missing $asset" >&2; exit 1; }
+            done
+            echo "SHA256SUMS covers ${#assets[@]} assets"
+          )
           cat dist/SHA256SUMS
 
           {
@@ -214,3 +241,46 @@ jobs:
           gh release create "$TAG" dist/* \
             --title "goose-doc for goose $VERSION" \
             --notes-file notes.md
+
+      # `fetch` verifies the bundle it downloads against SHA256SUMS before
+      # extracting it. A release whose SHA256SUMS omits the bundle silently
+      # disables that check, so exercise the real download path against the
+      # release that was just published.
+      - name: Verify fetch against the published release
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # The bundle must be listed in SHA256SUMS, which is what `fetch` reads.
+          # Private release assets are served through the API, not a plain URL.
+          SUM_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --jq '.assets[] | select(.name=="SHA256SUMS") | .id')"
+          gh api "repos/$GITHUB_REPOSITORY/releases/assets/$SUM_ID" \
+            -H "Accept: application/octet-stream" > SHA256SUMS.published
+          cat SHA256SUMS.published
+
+          for asset in "goose-docs-$VERSION.tar.gz" "goose-docs-$VERSION-lean.tar.gz"; do
+            grep -qE "[ *]$asset\$" SHA256SUMS.published \
+              || { echo "SHA256SUMS does not cover $asset, so fetch would skip verification" >&2; exit 1; }
+            echo "SHA256SUMS covers $asset"
+          done
+
+          # Now the real path: download and verify the default (lean) bundle.
+          BIN="dist/goose-doc-linux-x86_64"
+          chmod +x "$BIN"
+          CACHE="$(mktemp -d)"
+          "$BIN" fetch "$VERSION" --cache-dir "$CACHE" 2>&1 | tee fetch.log
+
+          grep -q "cached goose docs" fetch.log \
+            || { echo "fetch did not report a cached bundle" >&2; exit 1; }
+          if grep -q "no checksum available" fetch.log; then
+            echo "fetch skipped checksum verification" >&2
+            exit 1
+          fi
+
+          "$BIN" doctor --cache-dir "$CACHE" --docs-version "$VERSION" | tee doctor.log
+          grep -q "pages:" doctor.log || { echo "fetched bundle is not usable" >&2; exit 1; }
+
+          echo "published release verified"
