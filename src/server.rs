@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -75,6 +75,7 @@ pub fn parse_bind(bind: &str) -> Result<IpAddr> {
 /// Bind and start serving. Returns once the listener is accepting.
 pub async fn start(docs: &DocsRoot, bind: &str, port: u16) -> Result<RunningServer> {
     let ip = parse_bind(bind)?;
+    check_servable(docs)?;
 
     let requests = Arc::new(AtomicU64::new(0));
     let state = AppState {
@@ -131,6 +132,23 @@ pub async fn start(docs: &DocsRoot, bind: &str, port: u16) -> Result<RunningServ
         requests,
         shutdown: Some(shutdown_tx),
     })
+}
+
+/// Refuse to start a server that has no documentation behind it.
+///
+/// Every entry point resolves the docs root through `docs::resolve`, which
+/// already refuses an empty root. This re-checks the root we are about to serve,
+/// so a caller that constructs a `DocsRoot` some other way still cannot report
+/// "running" while every request would 404.
+fn check_servable(docs: &DocsRoot) -> Result<()> {
+    if docs.entries == 0 {
+        bail!(
+            "the docs root holds no pages, so there is nothing to serve. \
+             Run `goose-doc fetch <version>`, pass --docs-dir, or use a binary \
+             with the documentation embedded."
+        );
+    }
+    Ok(())
 }
 
 /// Build the URL a client should use.
@@ -286,6 +304,17 @@ fn not_found(relative: &Path) -> Response {
 mod tests {
     use super::*;
     use crate::docs;
+
+    #[test]
+    fn starting_without_pages_is_refused() {
+        let empty = docs::DocsRoot {
+            path: std::path::PathBuf::from("/tmp/goose-doc-empty"),
+            entries: 0,
+            version: None,
+        };
+        let error = check_servable(&empty).unwrap_err().to_string();
+        assert!(error.contains("no pages"), "got: {error}");
+    }
 
     #[test]
     fn parse_bind_accepts_addresses_and_rejects_hostnames() {
