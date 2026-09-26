@@ -261,7 +261,8 @@ fn token_from_env() -> Option<String> {
 pub async fn fetch(cache_root: &Path, version: &str, source: &BundleSource) -> Result<DocsRoot> {
     let bare = version.trim_start_matches('v');
     let bundle_name = format!("goose-docs-{bare}.tar.gz");
-    let release_tag = format!("docs-v{bare}");
+    // One release per goose version, tagged with that version.
+    let release_tag = format!("v{bare}");
 
     let client = reqwest::Client::builder()
         .user_agent(concat!("goose-doc/", env!("CARGO_PKG_VERSION")))
@@ -655,7 +656,7 @@ mod tests {
             repo: Some("soolmuk/goose-doc".to_string()),
             token: None,
         };
-        assert!(resolve_asset_url_sync(&source, "docs-v1.52.0", "x.tar.gz").contains("/repos/"));
+        assert!(resolve_asset_url_sync(&source, "v1.52.0", "x.tar.gz").contains("/repos/"));
         let _ = dir;
     }
 
@@ -667,8 +668,8 @@ mod tests {
             token: None,
         };
         assert_eq!(
-            resolve_asset_url_sync(&source, "docs-v1.52.0", "x.tar.gz"),
-            "https://mirror.internal/goose/docs-v1.52.0/x.tar.gz"
+            resolve_asset_url_sync(&source, "v1.52.0", "x.tar.gz"),
+            "https://mirror.internal/goose/v1.52.0/x.tar.gz"
         );
     }
 

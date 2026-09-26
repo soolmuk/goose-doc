@@ -1,31 +1,108 @@
-name: Release App
+name: Release
 
-# Publishes goose-doc binaries for every supported platform.
+# Publishes one release per goose version, tagged with that version, containing
+# both the docs bundle and the goose-doc binaries for every supported platform.
 #
-# The docs bundle is published separately by docs-bundle.yml, so this workflow
-# only deals with the app. Binaries are named with the target triple so the
-# platform is unambiguous.
+# Keeping them together means a consumer needs a single tag: fetch the docs
+# bundle from the same release that provides the server binary.
+#
+# A release already published for a version is left alone, so the six daily runs
+# do not rebuild a 344 MB bundle when nothing has changed.
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "App version tag, e.g. 0.1.0 (blank = read from Cargo.toml)"
+      goose_version:
+        description: "goose release tag or version (blank = latest goose release)"
         required: false
         type: string
+  schedule:
+    - cron: "0 0,4,8,12,16,20 * * *"
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  build:
+  resolve:
+    name: Resolve goose version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+      skip: ${{ steps.pick.outputs.skip }}
+    steps:
+      - name: Pick version
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.goose_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION}" ]; then
+            TAG="${INPUT_VERSION}"
+          else
+            TAG="$(gh api repos/aaif-goose/goose/releases/latest --jq '.tag_name')"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v$TAG" ;;
+          esac
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Resolved goose release: $TAG"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  bundle:
+    name: Build docs bundle
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "20"
+
+      - name: Build bundle
+        run: |
+          set -euo pipefail
+          ./tools/build-docs-bundle.sh "${{ needs.resolve.outputs.tag }}" --out-dir ./out
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: docs-bundle
+          path: ./out/goose-docs-${{ needs.resolve.outputs.version }}.tar.gz*
+          if-no-files-found: error
+          retention-days: 7
+
+  app:
+    name: Build app
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
     uses: ./.github/workflows/build-app.yml
     with:
       upload_artifacts: true
 
-  release:
+  publish:
     name: Publish release
-    needs: build
+    needs: [resolve, bundle, app]
+    if: needs.resolve.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,62 +111,85 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@v8.0.1
         with:
+          pattern: goose-doc-*
           path: dist
           merge-multiple: true
 
-      - name: Resolve version
-        id: version
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [ -n "${INPUT_VERSION}" ]; then
-            VERSION="${INPUT_VERSION#v}"
-          else
-            VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=app-v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Releasing $VERSION"
+      - name: Download bundle
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: docs-bundle
+          path: dist
 
-      - name: Checksums
+      - name: Assemble assets
+        id: assets
         run: |
           set -euo pipefail
           ls -la dist
-          # build-app.yml writes a "<asset>.sha256" next to each asset, so the
-          # release-level manifest is just those lines combined.
-          cat dist/./*.sha256 > dist/SHA256SUMS
+
+          BUNDLE="goose-docs-${{ needs.resolve.outputs.version }}.tar.gz"
+          test -f "dist/$BUNDLE" || { echo "missing $BUNDLE" >&2; exit 1; }
+
+          ENTRIES="$(jq -r '.entries' "dist/$BUNDLE.manifest.json")"
+          BYTES="$(jq -r '.bytes' "dist/$BUNDLE.manifest.json")"
+          SHA="$(jq -r '.sha256' "dist/$BUNDLE.manifest.json")"
+          SIZE_MB="$(awk -v b="$BYTES" 'BEGIN { printf "%.1f", b/1048576 }')"
+
+          # One manifest covering every asset in the release.
+          (cd dist && cat ./*.sha256 > SHA256SUMS)
           cat dist/SHA256SUMS
 
-      - name: Publish release
+          {
+            echo "entries=$ENTRIES"
+            echo "sha=$SHA"
+            echo "size_mb=$SIZE_MB"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          ENTRIES: ${{ steps.assets.outputs.entries }}
+          SIZE_MB: ${{ steps.assets.outputs.size_mb }}
+          SHA: ${{ steps.assets.outputs.sha }}
         run: |
           set -euo pipefail
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Uploading to existing release $TAG"
-            gh release upload "$TAG" dist/* --clobber
-            exit 0
-          fi
-
           printf '%s\n' \
-            "goose-doc $VERSION" \
+            "goose-doc for goose \`$VERSION\`." \
             "" \
-            "Serves a goose docs root over HTTP so the built-in \`goose-doc-guide\`" \
-            "skill reads it without internet access. See README.md." \
+            "One release per goose version: it carries both the docs bundle the" \
+            "server serves and the server binary for each platform, so a single" \
+            "tag provides everything." \
             "" \
-            "| platform | asset |" \
+            "| asset | what it is |" \
             "|---|---|" \
-            "| Linux x86_64 | \`goose-doc-linux-x86_64\` |" \
-            "| macOS arm64 | \`goose-doc-macos-arm64\` |" \
-            "| Windows x86_64 | \`goose-doc-windows-x86_64.exe\` |" \
+            "| \`goose-docs-$VERSION.tar.gz\` | docs root: \`goose-docs-map.md\` + \`docs/**\` |" \
+            "| \`goose-doc-linux-x86_64\` | server, Linux x86_64 |" \
+            "| \`goose-doc-macos-arm64\` | server, macOS arm64 |" \
+            "| \`goose-doc-windows-x86_64.exe\` | server, Windows x86_64 |" \
             "" \
-            "Docs bundles are published separately under \`docs-v*\` tags." \
+            "Docs bundle: $ENTRIES pages, $SIZE_MB MB, sha256 \`$SHA\`." \
+            "" \
+            "## Use it" \
+            "" \
+            "\`\`\`sh" \
+            "# download the docs bundle, then serve it" \
+            "goose-doc fetch $VERSION" \
+            "goose-doc --port 10650" \
+            "" \
+            "# or point goose at a running server" \
+            "GOOSE_DOCS_ROOT=http://<host>:10650" \
+            "\`\`\`" \
+            "" \
+            "The bundle is also usable directly without a server:" \
+            "\`GOOSE_DOCS_ROOT=/path/to/extracted/bundle\`." \
+            "" \
+            "Documentation content is Apache-2.0, from" \
+            "https://github.com/aaif-goose/goose (\`$VERSION\`)." \
             > notes.md
 
           gh release create "$TAG" dist/* \
-            --title "goose-doc $VERSION" \
+            --title "goose-doc for goose $VERSION" \
             --notes-file notes.md
