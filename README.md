@@ -247,9 +247,10 @@ Bundles are published as release assets. If the repository is private, set
 GH_TOKEN=... ./goose-doc fetch 1.52.0
 ```
 
-The server deliberately does **not** render pages or fall back to an HTML
-shell: a missing path returns 404, so a broken link surfaces instead of being
-masked. Markdown is served as `text/plain`, which is what the skill reads.
+The server serves the built site as-is and does **not** fall back to an HTML
+shell: a path that does not exist returns 404, so a broken link surfaces
+instead of being masked. Markdown is served as `text/plain`, which is what the
+skill reads.
 
 ### What gets served, and from where
 

@@ -40,10 +40,13 @@ ALWAYS_EXT = {
 # site: absolute ("/img/x.png", how Docusaurus emits most links) and relative
 # ("img/x.png", used by the home page's hero). Both must be captured, or the
 # file is dropped from the bundle and 404s offline.
-ABS_REF = re.compile(r'(?:src|href|srcset|content|data-src)="(/[^"]+?)"')
+ABS_REF = re.compile(r'(?:src|href|content|data-src)="(/[^"]+?)"')
 REL_REF = re.compile(
-    r'(?:src|href|srcset|content|data-src)="(?!/|#|https?:|mailto:|data:)([^"]+?)"'
+    r'(?:src|href|content|data-src)="(?!/|#|https?:|mailto:|data:)([^"]+?)"'
 )
+# A srcset holds several candidates with descriptors ("a.png 1x, b.png 2x"), so
+# it is parsed on its own rather than stored as a single, unmatched path.
+SRCSET_REF = re.compile(r'srcset="([^"]+?)"')
 
 # Images are downscaled to this budget; the site's decoration does not need more.
 MAX_IMAGE_BYTES = 150 * 1024
@@ -93,6 +96,19 @@ def kept(rel_dir):
     return rel_dir.split("/")[0] not in SKIP_TOP
 
 
+def clean_ref(ref):
+    """Drop a fragment or query, which are not part of the file path."""
+    return ref.split("#", 1)[0].split("?", 1)[0]
+
+
+def srcset_paths(value):
+    """Yield each candidate path in a srcset, without its descriptor."""
+    for candidate in value.split(","):
+        candidate = candidate.strip().split(None, 1)[0] if candidate.strip() else ""
+        if candidate:
+            yield clean_ref(candidate)
+
+
 def referenced_assets(root):
     """Every asset path a kept HTML page points at.
 
@@ -111,9 +127,21 @@ def referenced_assets(root):
                 continue
             with open(os.path.join(base, name), encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
-            for ref in ABS_REF.findall(text):
-                refs.add(ref.lstrip("/"))
-            for ref in REL_REF.findall(text):
+            absolute = [clean_ref(r) for r in ABS_REF.findall(text)]
+            relative = [clean_ref(r) for r in REL_REF.findall(text)]
+            for value in SRCSET_REF.findall(text):
+                for ref in srcset_paths(value):
+                    if ref.startswith("/"):
+                        absolute.append(ref.lstrip("/"))
+                    else:
+                        relative.append(ref)
+
+            for ref in absolute:
+                if ref:
+                    refs.add(ref.lstrip("/"))
+            for ref in relative:
+                if not ref:
+                    continue
                 joined = ref if rel_dir == "." else f"{rel_dir}/{ref}"
                 refs.add(os.path.normpath(joined).replace("\\", "/"))
     return refs
@@ -145,16 +173,17 @@ def localize_fonts(dest):
     """Download the stylesheet's remote fonts and point the CSS at them.
 
     Without this the brand font would only load online, and an offline reader
-    would see the page in a fallback font. A failed download leaves the original
-    URL in place, so the bundle still builds without network access.
+    would see the page in a fallback font. Returns (localized, failed) so the
+    caller can refuse to package a bundle that still needs the network.
     """
     css_root = os.path.join(dest, "assets", "css")
     if not os.path.isdir(css_root):
-        return 0
+        return 0, 0
 
     import urllib.request
 
     localized = 0
+    failed = 0
     for name in os.listdir(css_root):
         if not name.endswith(".css"):
             continue
@@ -163,7 +192,7 @@ def localize_fonts(dest):
             text = fh.read()
 
         def replace(match):
-            nonlocal localized
+            nonlocal localized, failed
             url = match.group(1)
             file_name = url.rsplit("/", 1)[-1]
             target = os.path.join(dest, FONT_DIR.replace("/", os.sep), file_name)
@@ -174,6 +203,7 @@ def localize_fonts(dest):
                         data = response.read()
                 except Exception as error:  # noqa: BLE001
                     print(f"    warning: could not fetch {file_name}: {error}")
+                    failed += 1
                     return match.group(0)
                 with open(target, "wb") as out:
                     out.write(data)
@@ -187,7 +217,7 @@ def localize_fonts(dest):
 
     if localized:
         print(f"    localized {localized} font references")
-    return localized
+    return localized, failed
 
 
 def main():
@@ -238,7 +268,16 @@ def main():
     print(f"    {count} files, {total / 1048576:.1f} MB")
 
     print("==> Localizing the brand font")
-    localize_fonts(dest)
+    localized, failed = localize_fonts(dest)
+    if failed:
+        print(
+            f"Error: {failed} font(s) could not be fetched, so the bundle would "
+            f"still need the network to render. Re-run with network access.",
+            file=sys.stderr,
+        )
+        return 1
+    if not localized:
+        print("    no remote fonts found in the stylesheet")
 
     # The map must resolve completely, or the skill silently misses pages.
     with open(os.path.join(src, "goose-docs-map.md"), encoding="utf-8") as fh:

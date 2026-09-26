@@ -20,6 +20,12 @@ LINK = re.compile(r'href="(/[^"#]*)"')
 SKIP = (".css", ".js", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".xml",
         ".json", ".zip", ".txt", ".webp", ".gif", ".woff", ".woff2")
 
+# Sections the trimmed bundle drops on purpose. Their 404s are expected, so they
+# are reported but do not fail the run: without this the check could never pass
+# on the bundle that actually ships.
+IGNORED_PREFIXES = ("/blog", "/community", "/extensions", "/recipes",
+                    "/deeplink-generator")
+
 
 def fetch(url):
     request = urllib.request.Request(url, headers={"User-Agent": "goose-doc-crawl"})
@@ -97,9 +103,33 @@ while queue and checked < MAX_PAGES:
             continue
         queue.append(link)
 
-print(f"pages checked:  {checked} (broken: {len(bad_pages)})")
-print(f"assets checked: {len(seen_assets)} (broken: {len(bad_assets)})")
-for status, path in bad_pages[:15]:
+expected_pages = [entry for entry in bad_pages
+                   if entry[1].startswith(IGNORED_PREFIXES)]
+expected_assets = [entry for entry in bad_assets
+                   if entry[2].startswith(IGNORED_PREFIXES)]
+unexpected_pages = [entry for entry in bad_pages
+                    if not entry[1].startswith(IGNORED_PREFIXES)]
+unexpected_assets = [entry for entry in bad_assets
+                     if not entry[2].startswith(IGNORED_PREFIXES)]
+
+print(f"pages checked:  {checked} (broken: {len(bad_pages)}, "
+      f"{len(expected_pages)} trimmed on purpose)")
+print(f"assets checked: {len(seen_assets)} (broken: {len(bad_assets)}, "
+      f"{len(expected_assets)} trimmed on purpose)")
+for status, path in expected_pages[:5]:
+    print(f"  page {status} (trimmed)  {path}")
+for status, ref, target, page in expected_assets[:5]:
+    print(f"  asset {status} (trimmed)  {ref}")
+for status, path in unexpected_pages[:15]:
     print(f"  PAGE  {status}  {path}")
-for status, ref, target, page in bad_assets[:25]:
+for status, ref, target, page in unexpected_assets[:25]:
     print(f"  ASSET {status}  {ref}  -> {target}   (on {page})")
+
+if unexpected_pages or unexpected_assets:
+    print()
+    print(f"FAILED: {len(unexpected_pages)} page(s) and "
+          f"{len(unexpected_assets)} asset(s) that should have been served")
+    sys.exit(1)
+
+print()
+print("OK: every page and asset that should be served resolves")
