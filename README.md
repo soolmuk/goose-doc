@@ -247,8 +247,13 @@ The order is:
 3. newest cached bundle
 4. **the copy embedded in the binary**
 
-Only the pages `goose-docs-map.md` names are embedded (61 pages, ~760 KB),
+Only the pages `goose-docs-map.md` names are embedded (61 pages, ~650 KB),
 which keeps the binary small. `goose-doc doctor` reports which one is in use.
+
+> The binary is mostly its dependencies, not the documentation: the embedded
+> docs are **4% (0.62 MB)** of the 15.6 MB Windows executable, the rest being the
+> HTTP server, TLS, the GUI, and the async runtime. Shrinking the docs further
+> would not shrink the download meaningfully.
 
 ### Behaviour worth knowing
 

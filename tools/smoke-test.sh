@@ -87,26 +87,34 @@ SERVER_PID=$!
 # Own the child explicitly: without this the shell prints a "Terminated" job
 # notice on shutdown, which looks like a failure in CI logs.
 disown "$SERVER_PID" 2>/dev/null || true
+# Wait for a started server to print its advertised address, then return the URL.
+wait_for_url() {
+  local log="$1"
+  local addr=""
+  local n=0
+  while [ "$n" -lt 75 ]; do
+    n=$((n + 1))
+    addr="$(sed -n 's|.*Serving goose docs at http://\([^ ]*\).*|\1|p' "$log" | head -1)"
+    [ -n "$addr" ] && break
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "Error: server exited during startup" >&2
+      cat "$log" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
 
-ADDR=""
-i=0
-while [ "$i" -lt 75 ]; do
-  i=$((i + 1))
-  ADDR="$(sed -n 's|.*Serving goose docs at http://\([^ ]*\).*|\1|p' "$LOG" | head -1)"
-  [ -n "$ADDR" ] && break
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "Error: server exited during startup" >&2
-    cat "$LOG" >&2
+  if [ -z "$addr" ]; then
+    echo "Error: server did not report an address" >&2
+    cat "$log" >&2
     exit 1
   fi
-  sleep 0.2
-done
 
-if [ -z "$ADDR" ]; then
-  echo "Error: server did not report an address" >&2
-  cat "$LOG" >&2
-  exit 1
-fi
+  printf 'http://%s' "$addr"
+}
+
+ADDR="$(wait_for_url "$LOG")"
+ADDR="${ADDR#http://}"
 
 # A wildcard bind is not dialable, so the advertised address must be concrete.
 case "$ADDR" in
@@ -179,6 +187,34 @@ if curl -s -o /dev/null --max-time 3 "$BASE/healthz" 2>/dev/null; then
   fail "port still serving after stop"
 fi
 pass "stopped and released the port"
+
+# The shipped binary is expected to carry the documentation, which is what makes
+# a single download sufficient. `include_dir!` does not declare src/embedded as a
+# build dependency, so a change to that directory can be silently missed and a
+# release binary can carry docs for the wrong goose version. Check it here rather
+# than trusting the build order.
+echo "==> The binary carries its own documentation"
+EMBEDDED_LOG="$(mktemp)"
+STALE_CACHE="$(mktemp -d)"
+"$BIN" --headless --cache-dir "$STALE_CACHE" --port 0 > "$EMBEDDED_LOG" 2>&1 &
+SERVER_PID=$!
+disown "$SERVER_PID" 2>/dev/null || true
+BASE="$(wait_for_url "$EMBEDDED_LOG")"
+
+MAP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/goose-docs-map.md")"
+if [ "$MAP_CODE" = "200" ]; then
+  pass "embedded map served with an empty cache"
+else
+  fail "embedded docs" "map returned $MAP_CODE; the binary has no docs embedded"
+fi
+
+EMBEDDED_PAGES="$(curl -s "$BASE/goose-docs-map.md" | grep -oE '\(docs/[^)]+\.md\)' | sort -u | wc -l | tr -d ' ')"
+[ "$EMBEDDED_PAGES" -gt 0 ] \
+  && pass "embedded map lists $EMBEDDED_PAGES pages" \
+  || fail "embedded map" "lists no pages"
+
+stop_server
+rm -f "$EMBEDDED_LOG"
 
 echo
 echo "==> PASSED"
