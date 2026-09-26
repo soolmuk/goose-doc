@@ -102,10 +102,28 @@ Verify the download against `SHA256SUMS` before running it.
 3. The panel shows the URL other machines should use, and a **Copy** button for
    the `GOOSE_DOCS_ROOT=...` line.
 
-Nothing else is needed and nothing is downloaded: the 61 pages the skill reads
-are inside the executable, so **Start** works offline and on a machine that has
-never seen a bundle. The docs root line in the panel reads *embedded in the
-binary* in that case.
+Nothing else is needed and nothing is downloaded: the documentation site is
+inside the executable, so **Start** works offline and on a machine that has never
+seen a bundle. The docs root line in the panel reads *embedded in the binary* in
+that case.
+
+Opening the printed URL in a browser shows the same documentation site that
+`goose-docs.ai` serves: the landing page, the navigation, and every guide. The
+same port still serves the raw markdown the `goose-doc-guide` skill reads, so one
+file answers both a person browsing and a skill reading.
+
+| URL | what it returns |
+|---|---|
+| `/` | the documentation site |
+| `/docs/guides/offline-docs` | a rendered page (the `.md` suffix is optional) |
+| `/docs/guides/offline-docs.md` | the raw markdown the skill reads |
+| `/goose-docs-map.md` | the docs map |
+| `/healthz` | `ok` |
+
+The embedded copy is the site built from goose's `documentation/` directory with
+`npm run build`, trimmed of the blog and demo videos the documentation never
+loads. A downloaded bundle still wins when one is present, because it can also
+carry that media.
 
 To run it without a window, for a machine that only serves:
 
@@ -229,9 +247,10 @@ Bundles are published as release assets. If the repository is private, set
 GH_TOKEN=... ./goose-doc fetch 1.52.0
 ```
 
-The server deliberately does **not** render pages or fall back to an HTML
-shell: a missing path returns 404, so a broken link surfaces instead of being
-masked. Markdown is served as `text/plain`, which is what the skill reads.
+The server serves the built site as-is and does **not** fall back to an HTML
+shell: a path that does not exist returns 404, so a broken link surfaces
+instead of being masked. Markdown is served as `text/plain`, which is what the
+skill reads.
 
 ### What gets served, and from where
 
@@ -247,13 +266,17 @@ The order is:
 3. newest cached bundle
 4. **the copy embedded in the binary**
 
-Only the pages `goose-docs-map.md` names are embedded (61 pages, ~650 KB),
-which keeps the binary small. `goose-doc doctor` reports which one is in use.
+The embedded copy is the documentation site built from goose's `documentation/`
+directory with `npm run build`, trimmed of the blog and the demo videos nothing
+reads: the map's pages, their HTML, and the assets those pages use (~21 MB
+compressed). That trim is what keeps the binary at ~53 MB rather than several
+hundred; the blog media alone is why the published bundle reaches 344 MB.
+`goose-doc doctor` reports which copy is in use.
 
 > The binary is mostly its dependencies, not the documentation: the embedded
-> docs are **4% (0.62 MB)** of the 15.6 MB Windows executable, the rest being the
-> HTTP server, TLS, the GUI, and the async runtime. Shrinking the docs further
-> would not shrink the download meaningfully.
+> site is about 40 MB uncompressed, the rest being the HTTP server, TLS, the
+> GUI, and the async runtime. Trimming it further would remove pages readers
+> use, so the blog and videos are the only thing left out.
 
 ### Behaviour worth knowing
 

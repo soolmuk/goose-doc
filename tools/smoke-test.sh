@@ -208,6 +208,61 @@ else
   fail "embedded docs" "map returned $MAP_CODE; the binary has no docs embedded"
 fi
 
+# A single executable has no site bundle on disk, so the embedded copy must
+# answer a browser at "/" with a page rather than a 404.
+echo "==> The embedded copy is browsable"
+ROOT_CODE="$(code /)"
+if [ "$ROOT_CODE" = "200" ]; then
+  pass "/ is served from the embedded copy"
+else
+  fail "/ from the embedded copy" "got: $ROOT_CODE"
+fi
+
+ROOT_CT="$(curl -s -o /dev/null -w '%{content_type}' "$BASE/")"
+case "$ROOT_CT" in
+  text/html*) pass "/ is HTML" ;;
+  *) fail "/ content type" "got: $ROOT_CT" ;;
+esac
+
+# A page addressed the way the site links to it: without the .md suffix,
+# which is how Docusaurus routes read.
+FIRST_PAGE="$(curl -s "$BASE/goose-docs-map.md" | grep -oE '\(docs/[^)]+\.md\)' | tr -d '()' | sort -u | head -1)"
+PAGE_ROUTE="${FIRST_PAGE%.md}"
+PAGE_CODE="$(code "/$PAGE_ROUTE")"
+if [ "$PAGE_CODE" = "200" ]; then
+  pass "/$PAGE_ROUTE is served"
+else
+  fail "extensionless route" "got: $PAGE_CODE"
+fi
+
+RAW_CT="$(curl -s -o /dev/null -w '%{content_type}' "$BASE/$FIRST_PAGE")"
+case "$RAW_CT" in
+  text/plain*) pass "the raw markdown is still plain text" ;;
+  *) fail "raw markdown content type" "got: $RAW_CT" ;;
+esac
+
+# An offline reader has no network, so everything the page renders with must
+# come from the bundle. The home page hero logo and the brand font both did not,
+# which showed up as a broken image and a fallback font.
+echo "==> Page assets resolve offline"
+for asset in "/img/goose-logo-black.png" "/img/logo_light.png"; do
+  ASSET_CODE="$(code "$asset")"
+  if [ "$ASSET_CODE" = "200" ]; then
+    pass "$asset is served"
+  else
+    fail "asset $asset" "got: $ASSET_CODE"
+  fi
+done
+
+CSS_FILE="$(curl -s "$BASE/" | grep -oE '/assets/css/[^"]+\.css' | head -1)"
+if [ -n "$CSS_FILE" ]; then
+  if curl -s "$BASE$CSS_FILE" | grep -q 'https://'; then
+    fail "stylesheet is offline-safe" "it still loads a resource from another origin"
+  else
+    pass "stylesheet needs nothing from the network"
+  fi
+fi
+
 EMBEDDED_PAGES="$(curl -s "$BASE/goose-docs-map.md" | grep -oE '\(docs/[^)]+\.md\)' | sort -u | wc -l | tr -d ' ')"
 [ "$EMBEDDED_PAGES" -gt 0 ] \
   && pass "embedded map lists $EMBEDDED_PAGES pages" \
