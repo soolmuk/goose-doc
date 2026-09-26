@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 use goose_doc::addr;
-use goose_doc::cli::{Cli, Command};
+use goose_doc::cli::{Cli, Command, ServiceAction};
 use goose_doc::config;
 use goose_doc::docs::{self, DocsRoot};
 use goose_doc::panel::Panel;
 use goose_doc::server;
+use goose_doc::service;
 use goose_doc::settings::Settings;
 
 fn main() -> Result<()> {
@@ -16,9 +17,12 @@ fn main() -> Result<()> {
     init_tracing();
 
     match &cli.command {
-        Some(Command::Fetch { .. } | Command::Doctor { .. } | Command::Addresses) => {
-            runtime()?.block_on(run_command(cli))
-        }
+        Some(
+            Command::Fetch { .. }
+            | Command::Doctor { .. }
+            | Command::Addresses
+            | Command::Service { .. },
+        ) => runtime()?.block_on(run_command(cli)),
         // --headless never touches the windowing system, so it works anywhere.
         None if cli.headless => runtime()?.block_on(serve_headless(&cli)),
         None => serve_with_panel(cli),
@@ -51,9 +55,11 @@ async fn run_command(cli: Cli) -> Result<()> {
             version,
             base_url,
             cache_dir,
+            token,
         }) => {
             let cache = cache_dir.clone().unwrap_or(cache);
-            let root = docs::fetch(&cache, version, base_url).await?;
+            let source = docs::BundleSource::new(base_url, token.clone());
+            let root = docs::fetch(&cache, version, &source).await?;
             println!(
                 "{} ({} pages)\n{}",
                 root.version.as_deref().unwrap_or(version),
@@ -71,6 +77,25 @@ async fn run_command(cli: Cli) -> Result<()> {
             report(&root);
         }
         Some(Command::Addresses) => report_addresses(),
+        Some(Command::Service {
+            action,
+            apply,
+            start,
+            docs_dir,
+            docs_version,
+            cache_dir,
+        }) => {
+            let cache = cache_dir.clone().unwrap_or(cache);
+            run_service(
+                *action,
+                *apply,
+                *start,
+                docs_dir.as_deref(),
+                docs_version.as_deref(),
+                &cache,
+                &cli,
+            )?;
+        }
         None => unreachable!("serve paths are handled in main"),
     }
 
@@ -201,6 +226,76 @@ fn report(root: &DocsRoot) {
     println!("map:       {}", root.map_path().display());
     println!();
     println!("GOOSE_DOCS_ROOT={}", root.path.display());
+}
+
+/// Service management. The docs root is resolved first so the unit references a
+/// path that exists, rather than one that only appears after a download.
+#[allow(clippy::too_many_arguments)]
+fn run_service(
+    action: ServiceAction,
+    apply: bool,
+    start: bool,
+    docs_dir: Option<&Path>,
+    docs_version: Option<&str>,
+    cache: &Path,
+    cli: &Cli,
+) -> Result<()> {
+    let bin = std::env::current_exe().context("failed to locate the goose-doc binary")?;
+
+    // Uninstalling and querying must not depend on a docs root being present:
+    // a service is typically removed precisely when the docs are gone or broken.
+    let root = match action {
+        ServiceAction::Install => Some(resolve_docs(docs_dir, docs_version, cache)?),
+        _ => resolve_docs(docs_dir, docs_version, cache).ok(),
+    };
+
+    let (docs_path, entries) = match &root {
+        Some(root) => (root.path.clone(), root.entries),
+        None => (cache.join("bundles").join("unknown"), 0),
+    };
+
+    let settings = Settings {
+        bind: cli.bind_addr(),
+        port: cli.port,
+        docs_dir: Some(docs_path.clone()),
+        docs_version: None,
+        open_browser: false,
+    };
+
+    let plan = service::plan(&settings, &docs_path, &bin, cli.port)?;
+
+    match action {
+        ServiceAction::Install => {
+            println!("service: {}", plan.kind.label());
+            println!("location: {}", plan.location.display());
+            for line in service::install(&plan, apply, start)? {
+                println!("{line}");
+            }
+            if apply {
+                println!();
+                println!(
+                    "Serving {entries} pages at http://{}:{}",
+                    settings.bind, settings.port
+                );
+            }
+        }
+        ServiceAction::Uninstall => {
+            for line in service::uninstall(&plan, apply)? {
+                println!("{line}");
+            }
+        }
+        ServiceAction::Status => {
+            println!("service: {}", plan.kind.label());
+            println!("location: {}", plan.location.display());
+            println!();
+            match service::status(&plan) {
+                Ok(text) => println!("{text}"),
+                Err(error) => println!("could not query status: {error}"),
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn report_addresses() {

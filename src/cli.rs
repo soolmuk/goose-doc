@@ -36,6 +36,10 @@ pub struct Cli {
     #[arg(long)]
     pub docs_version: Option<String>,
 
+    /// Token for a private bundle repository. Defaults to GH_TOKEN or GITHUB_TOKEN.
+    #[arg(long, env = "GOOSE_DOC_GITHUB_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
+
     /// Override the bundle cache directory.
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
@@ -71,12 +75,16 @@ pub enum Command {
     Fetch {
         /// goose release tag or version, e.g. v1.52.0 or 1.52.0.
         version: String,
-        /// Base URL holding the bundle and its manifest.
+        /// Base URL holding the bundle and its manifest. For a GitHub
+        /// repository the release is resolved through the API.
         #[arg(long, default_value = DEFAULT_FETCH_BASE_URL)]
         base_url: String,
         /// Override the bundle cache directory.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Token for a private repository. Defaults to GH_TOKEN or GITHUB_TOKEN.
+        #[arg(long, env = "GOOSE_DOC_GITHUB_TOKEN", hide_env_values = true)]
+        token: Option<String>,
     },
     /// Show what goose-doc would serve and whether the docs root is valid.
     Doctor {
@@ -92,6 +100,33 @@ pub enum Command {
     },
     /// List the addresses this machine can serve on.
     Addresses,
+    /// Install, remove, or inspect a background service.
+    Service {
+        #[arg(value_enum)]
+        action: ServiceAction,
+        /// Write the unit/agent and enable it. Without this, only print it.
+        #[arg(long)]
+        apply: bool,
+        /// Start the service immediately after installing.
+        #[arg(long)]
+        start: bool,
+        /// Docs root the service should serve.
+        #[arg(long)]
+        docs_dir: Option<PathBuf>,
+        /// Cached bundle version the service should serve.
+        #[arg(long)]
+        docs_version: Option<String>,
+        /// Override the bundle cache directory.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceAction {
+    Install,
+    Uninstall,
+    Status,
 }
 
 #[cfg(test)]

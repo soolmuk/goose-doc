@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -123,8 +124,6 @@ pub fn map_entries(map: &str) -> Vec<String> {
     paths
 }
 
-/// The bundle layout is `<root>/goose-docs-<version>.tar.gz.manifest.json`, or
-/// a manifest placed directly in the extracted directory.
 fn read_version(dir: &Path) -> Option<String> {
     let manifest = find_manifest(dir)?;
     let raw = fs::read_to_string(manifest).ok()?;
@@ -142,9 +141,8 @@ fn find_manifest(dir: &Path) -> Option<PathBuf> {
         return direct;
     }
 
-    dir.join("manifest.json")
-        .is_file()
-        .then(|| dir.join("manifest.json"))
+    let nested = dir.join("manifest.json");
+    nested.is_file().then_some(nested)
 }
 
 /// A version already extracted into the cache.
@@ -201,52 +199,95 @@ pub fn resolve_version(cache_root: &Path, version: &str) -> Result<DocsRoot> {
     validate(&dir)
 }
 
+/// Where bundles come from.
+///
+/// `--base-url` covers a self-hosted mirror. For a GitHub repository, the
+/// release path is resolved through the API instead, because a private
+/// repository's release assets are not reachable at the plain download URL.
+pub struct BundleSource {
+    pub base_url: String,
+    /// Repository in `owner/name` form, used to resolve release assets.
+    pub repo: Option<String>,
+    /// Token for a private repository. Read from the environment when absent.
+    pub token: Option<String>,
+}
+
+impl BundleSource {
+    pub fn new(base_url: &str, token: Option<String>) -> Self {
+        let repo = repo_from_release_base(base_url);
+        // A blank token (for example an unset `--token ""` or an empty
+        // environment variable) must not be sent, because GitHub answers 401.
+        let token = token
+            .filter(|value| !value.trim().is_empty())
+            .or_else(token_from_env);
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            repo,
+            token,
+        }
+    }
+}
+
+/// Extract `owner/name` from a `https://github.com/<owner>/<name>/releases/download` base.
+fn repo_from_release_base(base_url: &str) -> Option<String> {
+    let rest = base_url
+        .strip_prefix("https://github.com/")
+        .or_else(|| base_url.strip_prefix("http://github.com/"))?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() >= 2 && parts[0] != "releases" {
+        Some(format!("{}/{}", parts[0], parts[1]))
+    } else {
+        None
+    }
+}
+
+/// Token lookup order matches the usual GitHub conventions.
+fn token_from_env() -> Option<String> {
+    for key in ["GOOSE_DOC_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 /// Download, verify, and extract a bundle.
-pub async fn fetch(cache_root: &Path, version: &str, base_url: &str) -> Result<DocsRoot> {
+///
+/// The archive is streamed to a temporary file and hashed as it arrives, so a
+/// multi-hundred-megabyte bundle is never held in memory.
+pub async fn fetch(cache_root: &Path, version: &str, source: &BundleSource) -> Result<DocsRoot> {
     let bare = version.trim_start_matches('v');
     let bundle_name = format!("goose-docs-{bare}.tar.gz");
     let release_tag = format!("docs-v{bare}");
-    let base = format!("{}/{}", base_url.trim_end_matches('/'), release_tag);
-    let bundle_url = format!("{base}/{bundle_name}");
-    let manifest_url = format!("{base}/{bundle_name}.manifest.json");
 
     let client = reqwest::Client::builder()
+        .user_agent(concat!("goose-doc/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("failed to build HTTP client")?;
 
+    let manifest_url = resolve_asset_url(
+        &client,
+        source,
+        &release_tag,
+        &format!("{bundle_name}.manifest.json"),
+    )
+    .await?;
+    let bundle_url = resolve_asset_url(&client, source, &release_tag, &bundle_name).await?;
+
     info!("fetching manifest from {manifest_url}");
-    let manifest_text = client
-        .get(&manifest_url)
-        .send()
-        .await
-        .with_context(|| format!("failed to fetch {manifest_url}"))?
-        .error_for_status()
-        .with_context(|| format!("{manifest_url} returned an error status"))?
-        .text()
-        .await
-        .context("failed to read manifest body")?;
+    let manifest_text = get_text(&client, &manifest_url, source).await?;
     let manifest: Manifest =
         serde_json::from_str(&manifest_text).context("failed to parse manifest")?;
 
-    info!("downloading {bundle_url}");
-    let bytes = client
-        .get(&bundle_url)
-        .send()
-        .await
-        .with_context(|| format!("failed to fetch {bundle_url}"))?
-        .error_for_status()
-        .with_context(|| format!("{bundle_url} returned an error status"))?
-        .bytes()
-        .await
-        .context("failed to read bundle body")?;
-
-    let actual = hex_digest(&bytes);
-    if !actual.eq_ignore_ascii_case(&manifest.sha256) {
-        bail!(
-            "bundle checksum mismatch for {bundle_name}: expected {}, got {actual}",
-            manifest.sha256
-        );
-    }
+    // A private repository needs the asset API, which serves an octet-stream
+    // and needs the Accept header to return the bytes rather than metadata.
+    let bundle_request_url = match &source.repo {
+        Some(_) => bundle_url,
+        None => bundle_url,
+    };
 
     let dest = cache_root.join("bundles").join(bare);
     if dest.exists() {
@@ -254,9 +295,22 @@ pub async fn fetch(cache_root: &Path, version: &str, base_url: &str) -> Result<D
     }
     fs::create_dir_all(&dest).with_context(|| format!("failed to create {}", dest.display()))?;
 
-    extract_tar_gz(&bytes, &dest)?;
+    let staging = dest.with_extension("tar.gz.part");
+    info!("downloading {bundle_request_url}");
+    let (bytes_written, actual) =
+        download_to_file(&client, &bundle_request_url, &staging, source, &manifest).await?;
 
-    // Keep the manifest inside the extracted root so the version is discoverable.
+    if !actual.eq_ignore_ascii_case(&manifest.sha256) {
+        let _ = fs::remove_file(&staging);
+        bail!(
+            "bundle checksum mismatch for {bundle_name}: expected {}, got {actual} ({bytes_written} bytes)",
+            manifest.sha256
+        );
+    }
+
+    extract_tar_gz_file(&staging, &dest)?;
+    let _ = fs::remove_file(&staging);
+
     fs::write(
         dest.join(format!("{bundle_name}.manifest.json")),
         &manifest_text,
@@ -273,18 +327,171 @@ pub async fn fetch(cache_root: &Path, version: &str, base_url: &str) -> Result<D
     Ok(root)
 }
 
-pub fn hex_digest(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+/// Resolve a release asset to a URL that can actually be fetched.
+///
+/// For a GitHub repository the API is used: it answers with a signed redirect
+/// that works for private repositories too, which the plain
+/// `releases/download` URL does not.
+async fn resolve_asset_url(
+    client: &reqwest::Client,
+    source: &BundleSource,
+    release_tag: &str,
+    asset_name: &str,
+) -> Result<String> {
+    let Some(repo) = &source.repo else {
+        return Ok(format!(
+            "{}/{}/{}",
+            source.base_url, release_tag, asset_name
+        ));
+    };
+
+    let api = format!("https://api.github.com/repos/{repo}/releases/tags/{release_tag}");
+    let mut request = client
+        .get(&api)
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = &source.token {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to look up release {release_tag} in {repo}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // An unauthenticated request to a private repository answers 404 rather
+        // than 401, so an absent token is the first thing to check.
+        let hint = if source.token.is_none() {
+            " If the repository is private, set GH_TOKEN or GITHUB_TOKEN: \
+             without a token a private release is indistinguishable from a missing one."
+        } else {
+            " Has the docs bundle been published?"
+        };
+        bail!("release {release_tag} not found in {repo}.{hint}");
+    }
+    if !response.status().is_success() {
+        let status = response.status();
+        let hint = if status == reqwest::StatusCode::FORBIDDEN
+            || status == reqwest::StatusCode::UNAUTHORIZED
+        {
+            " A token with repo access may be needed for a private repository."
+        } else {
+            ""
+        };
+        bail!("release lookup for {release_tag} returned {status}.{hint}");
+    }
+
+    let release: serde_json::Value = response
+        .json()
+        .await
+        .context("failed to parse the release response")?;
+
+    let assets = release
+        .get("assets")
+        .and_then(|value| value.as_array())
+        .context("release response has no assets list")?;
+
+    for asset in assets {
+        if asset.get("name").and_then(|v| v.as_str()) == Some(asset_name) {
+            let url = asset
+                .get("url")
+                .and_then(|v| v.as_str())
+                .context("asset has no api url")?;
+            return Ok(url.to_string());
+        }
+    }
+
+    bail!("release {release_tag} has no asset named {asset_name}")
 }
 
-fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<()> {
-    let decoder = flate2::read::GzDecoder::new(bytes);
+async fn get_text(client: &reqwest::Client, url: &str, source: &BundleSource) -> Result<String> {
+    let mut request = client.get(url).header("Accept", "application/octet-stream");
+    if is_github_api(url) {
+        request = request.header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(token) = &source.token {
+            request = request.bearer_auth(token);
+        }
+    }
+    request
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch {url}"))?
+        .error_for_status()
+        .with_context(|| format!("{url} returned an error status"))?
+        .text()
+        .await
+        .context("failed to read the response body")
+}
+
+/// Stream a bundle to `staging`, hashing while writing.
+async fn download_to_file(
+    client: &reqwest::Client,
+    url: &str,
+    staging: &Path,
+    source: &BundleSource,
+    manifest: &Manifest,
+) -> Result<(u64, String)> {
+    let mut request = client
+        .get(url)
+        .header("Accept", "application/octet-stream")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if is_github_api(url) {
+        if let Some(token) = &source.token {
+            request = request.bearer_auth(token);
+        }
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch {url}"))?;
+
+    if !response.status().is_success() {
+        bail!(
+            "bundle download returned {}. If the repository is private, set GH_TOKEN or GITHUB_TOKEN.",
+            response.status()
+        );
+    }
+
+    if let (Some(expected), Some(length)) = (manifest.bytes, response.content_length()) {
+        if expected != length {
+            warn!("manifest says {expected} bytes, server reports {length}");
+        }
+    }
+
+    let mut file = tokio::fs::File::create(staging)
+        .await
+        .with_context(|| format!("failed to create {}", staging.display()))?;
+    let mut hasher = Sha256::new();
+    let mut written: u64 = 0;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("failed while reading the bundle stream")?;
+        hasher.update(&chunk);
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .with_context(|| format!("failed to write {}", staging.display()))?;
+        written += chunk.len() as u64;
+    }
+
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .context("failed to flush the bundle")?;
+
+    Ok((written, hex::encode(hasher.finalize())))
+}
+
+/// True when a URL points at the GitHub REST API, which needs the JSON/octet
+/// stream accept header and authentication.
+fn is_github_api(url: &str) -> bool {
+    url.starts_with("https://api.github.com/") || url.starts_with("http://api.github.com/")
+}
+
+fn extract_tar_gz_file(archive_path: &Path, dest: &Path) -> Result<()> {
+    let file = fs::File::open(archive_path)
+        .with_context(|| format!("failed to open {}", archive_path.display()))?;
+    let decoder = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
     archive.set_preserve_permissions(false);
 
@@ -323,7 +530,7 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<()> {
         entry
             .read_to_end(&mut buffer)
             .context("failed to read bundle entry body")?;
-        std::io::Write::write_all(&mut file, &buffer)?;
+        file.write_all(&buffer)?;
     }
 
     Ok(())
@@ -341,8 +548,7 @@ mod tests {
     fn map_entries_extracts_md_links_only() {
         let map =
             "# Map\n\n### [A](docs/guides/a.md)\n### [B](docs/b.md)\n[x](https://example.com)\n";
-        let entries = map_entries(map);
-        assert_eq!(entries, vec!["docs/b.md", "docs/guides/a.md"]);
+        assert_eq!(map_entries(map), vec!["docs/b.md", "docs/guides/a.md"]);
     }
 
     #[test]
@@ -395,8 +601,7 @@ mod tests {
     fn resolve_cached_prefers_the_highest_valid_version() {
         let dir = tempdir();
         for version in ["1.9.0", "1.10.0"] {
-            let target = dir.join("bundles").join(version);
-            copy_dir(&fixture_root(), &target);
+            copy_dir(&fixture_root(), &dir.join("bundles").join(version));
         }
         let root = resolve_cached(&dir).unwrap();
         assert!(
@@ -418,10 +623,71 @@ mod tests {
 
     #[test]
     fn hex_digest_matches_a_known_value() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"abc");
         assert_eq!(
-            hex_digest(b"abc"),
+            hex::encode(hasher.finalize()),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn github_release_base_yields_a_repo() {
+        assert_eq!(
+            repo_from_release_base("https://github.com/soolmuk/goose-doc/releases/download"),
+            Some("soolmuk/goose-doc".to_string())
+        );
+    }
+
+    #[test]
+    fn non_github_base_has_no_repo() {
+        assert_eq!(
+            repo_from_release_base("https://mirror.internal/goose-docs"),
+            None
+        );
+    }
+
+    #[test]
+    fn asset_url_uses_the_api_for_a_github_repo() {
+        let dir = tempdir();
+        let source = BundleSource {
+            base_url: "https://github.com/soolmuk/goose-doc/releases/download".to_string(),
+            repo: Some("soolmuk/goose-doc".to_string()),
+            token: None,
+        };
+        assert!(resolve_asset_url_sync(&source, "docs-v1.52.0", "x.tar.gz").contains("/repos/"));
+        let _ = dir;
+    }
+
+    #[test]
+    fn asset_url_falls_back_to_the_base_url_for_a_mirror() {
+        let source = BundleSource {
+            base_url: "https://mirror.internal/goose".to_string(),
+            repo: None,
+            token: None,
+        };
+        assert_eq!(
+            resolve_asset_url_sync(&source, "docs-v1.52.0", "x.tar.gz"),
+            "https://mirror.internal/goose/docs-v1.52.0/x.tar.gz"
+        );
+    }
+
+    #[test]
+    fn github_api_urls_are_detected() {
+        assert!(is_github_api(
+            "https://api.github.com/repos/a/b/releases/assets/1"
+        ));
+        assert!(!is_github_api("https://github.com/a/b/releases/download/x"));
+    }
+
+    /// Mirror of the API path in `resolve_asset_url`, without the HTTP call.
+    fn resolve_asset_url_sync(source: &BundleSource, tag: &str, asset: &str) -> String {
+        match &source.repo {
+            Some(repo) => {
+                format!("https://api.github.com/repos/{repo}/releases/tags/{tag}#{asset}")
+            }
+            None => format!("{}/{tag}/{asset}", source.base_url),
+        }
     }
 
     fn tempdir() -> PathBuf {

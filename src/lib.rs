@@ -10,4 +10,5 @@ pub mod config;
 pub mod docs;
 pub mod panel;
 pub mod server;
+pub mod service;
 pub mod settings;
