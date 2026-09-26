@@ -150,8 +150,11 @@ jobs:
           MAP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://$ADDR/goose-docs-map.md")"
           [ "$MAP_CODE" = "200" ] || { echo "map returned $MAP_CODE"; cat "$LOG"; exit 1; }
 
-          PAGES="$(curl -s "http://$ADDR/goose-docs-map.md" | grep -cE '^\(docs/[^)]+\.md\)' || true)"
-          echo "embedded map served; page links: ${PAGES:-0}"
+          # The map lists pages as "### [Title](docs/path.md)".
+          PAGES="$(curl -s "http://$ADDR/goose-docs-map.md" \
+            | grep -oE '\(docs/[^)]+\.md\)' | sort -u | wc -l | tr -d ' ')"
+          echo "embedded map served; unique page links: $PAGES"
+          [ "$PAGES" -gt 0 ] || { echo "the embedded map lists no pages" >&2; exit 1; }
 
           kill "$PID" 2>/dev/null || true
           echo "embedded docs OK"
