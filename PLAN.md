@@ -598,6 +598,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 - **2026-09-26**: P0 확정(포트 10650, 번들 `site` 단일, 릴리즈 자산 배포, cron 1일 6회, macOS aarch64만, 영어 UI). 패널 방식을 egui 네이티브 창으로 확정하고 관련 절(§1, §3.1, §5.1, §5.3, §5.6~5.9, §6, §9, §11) 갱신.
 - **2026-09-26 (P1 완료)**: `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `.github/workflows/docs-bundle.yml`, `README.md` 작성. v1.52.0 실측으로 사실 F15~F21 추가, §4.1/§4.1.1/§4.1.2 갱신, 신규 리스크 G1~G3 등록. **site 번들이 344MB(스킬 필수분 1.8MB)임을 확인** — 대안 크기 측정치를 §4.1.2에 기록.
+- **2026-09-26 (P5 검증)**: 스케줄/자동 감지/멱등성 실측 완료(§10.4). 입력 없는 실행이 `v1.52.0`을 자동 감지했고, 재실행은 멱등하게 스킵했으며, v1.51.0으로 신규 번들 발행 → fetch → 서빙까지 버전별로 다른 문서가 제공되는 것을 확인했다. **cron 자체의 자동 실행은 아직 시각이 지나지 않아 미확인**(§10.4).
 - **2026-09-26 (P5 완료)**: `src/service.rs`(systemd 사용자/시스템, launchd, Windows `sc.exe`), `fetch`의 **비공개 저장소 지원**(GitHub API로 asset 해석) 과 **스트리밍 다운로드**(344MB를 메모리에 올리지 않음), `tools/check-linux.sh`(Linux 컨테이너에서 CI 동일 검증). 릴리스 `app-v0.1.0` 발행(3 OS + SHA256SUMS), 번들 `docs-v1.52.0` 발행. CI가 **컴파일 결함 2건**(Linux/Windows에서 각각 cfg로 인한 미사용 경고)을 잡아냈고, 이를 계기로 서비스 정의를 순수 함수로 분리해 **단일 테스트로 3플랫폼을 검증**하도록 구조를 바꿨다. **launchd 서비스를 실제 등록해 서빙까지 확인.**
 - **2026-09-26 (P4 완료)**: `build-app.yml`(3 OS 매트릭스), `release.yml` 추가, `tools/smoke-test.sh`를 Windows Git Bash 대응으로 재작성(disown, seq 제거, curl/체크섬 폴백). 비공개 저장소 **`soolmuk/goose-doc`** 생성 후 CI 3회 실행 → **3개 플랫폼 green**(run 36206440329), 아티팩트 3종. CI가 로컬에서 놓친 결함 **2건(D1 fmt, D2 아티팩트 입력)** 을 잡아냄 → §10.3. CI가 빌드한 Linux 바이너리로 실제 344MB 번들 서빙 확인.
 - **2026-09-26 (P3 완료)**: `panel/mod.rs`(GUI 비의존 상태 모델), `panel/app.rs`(eframe), `settings.rs`(영속화), `addr.rs` 추가. **실제 macOS GUI 창을 띄워 Start/Stop/창닫기를 클릭으로 검증**(스크린샷). eframe 0.36 API 변경(`App::ui`, `egui::Panel::top`)을 소스에서 확인해 반영. `--smoke-gui`는 도입하지 않음(xvfb 불필요).
@@ -653,6 +654,25 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 **교훈**: `#[cfg]`로 변수를 조건부 선언하지 말고, 조건부 로직을 분리해 전 플랫폼에서 컴파일·테스트한다.
 
 **다음 단계**: Windows/macOS의 컴파일 문제는 이 구조 변경으로 해소됐고, 3개 플랫폼이 green이다.
+
+---
+
+## 10.4 스케줄·자동 감지·멱등성 검증 (P5)
+
+| 항목 | 결과 |
+|---|---|
+| 워크플로 3개 `state` | ✅ 모두 `active` (`gh api .../actions/workflows`) |
+| cron 등록 | ✅ `0 0,4,8,12,16,20 * * *` (1일 6회, 4시간 간격) |
+| **입력 없이 실행 → 자동 감지** | ✅ 로그 `Resolved goose release: v1.52.0` (입력 생략 시 `releases/latest` 폴링) |
+| **멱등성** | ✅ 재실행 로그 `Asset already published for v1.52.0; nothing to do.`, 릴리즈 중복 없음 |
+| **새 버전 감지 → 번들 발행** | ✅ v1.51.0으로 동일 경로 실행 → 신규 릴리즈 `docs-v1.51.0` 생성(344MB + manifest) |
+| 발행된 번들의 **fetch → 서빙** | ✅ v1.51.0/v1.52.0 각각 다운로드·검증 후 서빙 |
+| **버전 선택 로직** | ✅ 미지정 → 최신(1.52.0), `--docs-version 1.51.0` → 1.51.0, `v1.51.0` 접두사 허용 |
+| **버전별 문서 차이 반영** | ✅ 서빙된 map sha가 버전별로 다름(1.51.0 `4e1a6b95…` / 1.52.0 `0df3aada…`). 1.52.0에 `Z.AI Coding Plan` 항목 추가 확인 |
+| 미출시 버전 요청 | ✅ `release docs-v1.99.0 not found … set GH_TOKEN` (명확한 안내) |
+| **cron 실제 실행 이력** | ⏳ `event=schedule` 실행 0건 — 워크플로 생성(09:29 KST)이 cron 시각을 지나지 않았다. 다음 시각 04:00 UTC(13:00 KST) 이후 확인 필요 |
+
+**cron 잔여 확인 방법**: `gh api "repos/soolmuk/goose-doc/actions/workflows/docs-bundle.yml/runs?event=schedule" --jq '.total_count'` 가 1 이상이면 자동 실행이 동작한 것이다. GitHub은 저장소 활동이 장기간 없으면 scheduled 워크플로를 비활성화하므로, 주기적으로 이 값과 워크플로 `state`를 확인한다.
 
 ---
 
