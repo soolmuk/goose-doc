@@ -52,8 +52,26 @@ impl ServiceKind {
 ///
 /// The docs root is passed explicitly, so a service started at boot does not
 /// depend on a bundle cache that may not be warm yet.
+/// Rendering inputs, so each platform's definition can be built and tested on
+/// any machine rather than only on its own platform.
+pub struct ServiceInputs<'a> {
+    pub bin: &'a str,
+    pub docs_dir: &'a str,
+    pub args: &'a [&'a str],
+    pub command_line: &'a str,
+    /// True when running as root, which selects a system unit over a user unit.
+    pub system: bool,
+    pub hostname: &'a str,
+    pub config_home: PathBuf,
+    pub log_dir: PathBuf,
+}
+
+/// Build the service definition for this platform.
+///
+/// The docs root is passed explicitly, so a service started at boot does not
+/// depend on a bundle cache that may not be warm yet.
 pub fn plan(settings: &Settings, docs_dir: &Path, bin: &Path, port: u16) -> Result<ServicePlan> {
-    let bin = bin
+    let bin_text = bin
         .to_str()
         .context("binary path is not valid UTF-8")?
         .to_string();
@@ -74,134 +92,182 @@ pub fn plan(settings: &Settings, docs_dir: &Path, bin: &Path, port: u16) -> Resu
         settings.bind.clone(),
     ];
 
-    let command_line = std::iter::once(bin.clone())
+    let command_line = std::iter::once(bin_text.clone())
         .chain(args.iter().cloned())
         .collect::<Vec<_>>()
         .join(" ");
 
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let inputs = ServiceInputs {
+        bin: &bin_text,
+        docs_dir: &docs_dir_text,
+        args: &arg_refs,
+        command_line: &command_line,
+        system: is_system_scope(),
+        hostname: &hostname(),
+        config_home: config_home(),
+        log_dir: crate::config::cache_dir(),
+    };
+
+    Ok(plan_for(current_platform(), &inputs))
+}
+
+/// Which definition to generate. Kept separate from the platform the binary was
+/// compiled for so every definition can be exercised in tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Systemd,
+    Launchd,
+    Windows,
+}
+
+fn current_platform() -> Platform {
     #[cfg(target_os = "linux")]
     {
-        let system = is_root();
-        let kind = if system {
-            ServiceKind::SystemdSystem
-        } else {
-            ServiceKind::SystemdUser
-        };
-        let location = if system {
-            PathBuf::from(format!("/etc/systemd/system/{SERVICE_NAME}.service"))
-        } else {
-            config_home()
-                .join("systemd")
-                .join("user")
-                .join(format!("{SERVICE_NAME}.service"))
-        };
-
-        let unit = format!(
-            "[Unit]\n\
-             Description=Serve goose documentation for the goose-doc-guide skill\n\
-             Documentation=https://goose-docs.ai/docs/guides/offline-docs\n\
-             Wants=network-online.target\n\
-             After=network-online.target\n\
-             \n\
-             [Service]\n\
-             Type=simple\n\
-             ExecStart={command_line}\n\
-             Restart=on-failure\n\
-             RestartSec=3\n\
-             WorkingDirectory={docs_dir}\n\
-             \n\
-             [Install]\n\
-             WantedBy={wanted_by}\n",
-            docs_dir = docs_dir_text,
-            wanted_by = if system {
-                "multi-user.target"
-            } else {
-                "default.target"
-            },
-        );
-
-        Ok(ServicePlan {
-            kind,
-            location,
-            contents: unit,
-            command_line,
-        })
+        Platform::Systemd
     }
-
     #[cfg(target_os = "macos")]
     {
-        let hostname = hostname();
-        let location = config_home()
-            .join("LaunchAgents")
-            .join(format!("com.goose-doc.{hostname}.plist"));
-        let log_dir = crate::config::cache_dir();
-        let stdout = log_dir.join("service.log");
-        let stderr = log_dir.join("service.err.log");
-
-        let mut program_args = String::new();
-        for arg in std::iter::once(&bin).chain(args.iter()) {
-            program_args.push_str(&format!("    <string>{}</string>\n", escape_xml(arg)));
-        }
-
-        let plist = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-             <plist version=\"1.0\">\n\
-             <dict>\n\
-             <key>Label</key>\n\
-             <string>com.goose-doc.{hostname}</string>\n\
-             <key>ProgramArguments</key>\n\
-             <array>\n\
-             {program_args}\
-             </array>\n\
-             <key>RunAtLoad</key>\n\
-             <true/>\n\
-             <key>KeepAlive</key>\n\
-             <true/>\n\
-             <key>StandardOutPath</key>\n\
-             <string>{stdout}</string>\n\
-             <key>StandardErrorPath</key>\n\
-             <string>{stderr}</string>\n\
-             </dict>\n\
-             </plist>\n",
-            stdout = escape_xml(&stdout.to_string_lossy()),
-            stderr = escape_xml(&stderr.to_string_lossy()),
-        );
-
-        Ok(ServicePlan {
-            kind: ServiceKind::Launchd,
-            location,
-            contents: plist,
-            command_line,
-        })
+        Platform::Launchd
     }
-
     #[cfg(target_os = "windows")]
     {
-        // `sc.exe` needs the executable and arguments quoted separately, and the
-        // argument list must keep its quotes or a path with spaces breaks.
-        let quoted_args = args
-            .iter()
-            .map(|arg| quote_windows(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        Ok(ServicePlan {
-            kind: ServiceKind::Windows,
-            location: PathBuf::from(format!("HKLM\\SYSTEM\\CurrentControlSet\\Services\\{SERVICE_NAME}")),
-            contents: format!(
-                "sc.exe create {SERVICE_NAME} binPath= \"\\\"{bin}\\\" {quoted_args}\" start= auto\n\
-                 sc.exe failure {SERVICE_NAME} reset= 86400 actions= restart/3000/restart/3000/restart/3000\n"
-            ),
-            command_line,
-        })
+        Platform::Windows
     }
-
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        let _ = args;
-        anyhow::bail!("service installation is not supported on this platform")
+        Platform::Systemd
+    }
+}
+
+/// Render the definition for a platform. Pure: it touches neither the network
+/// nor the filesystem, which is what makes it testable everywhere.
+pub fn plan_for(platform: Platform, inputs: &ServiceInputs<'_>) -> ServicePlan {
+    match platform {
+        Platform::Systemd => systemd_plan(inputs),
+        Platform::Launchd => launchd_plan(inputs),
+        Platform::Windows => windows_plan(inputs),
+    }
+}
+
+fn systemd_plan(inputs: &ServiceInputs<'_>) -> ServicePlan {
+    let kind = if inputs.system {
+        ServiceKind::SystemdSystem
+    } else {
+        ServiceKind::SystemdUser
+    };
+    let location = if inputs.system {
+        PathBuf::from(format!("/etc/systemd/system/{SERVICE_NAME}.service"))
+    } else {
+        inputs
+            .config_home
+            .join("systemd")
+            .join("user")
+            .join(format!("{SERVICE_NAME}.service"))
+    };
+
+    let contents = format!(
+        "[Unit]\n\
+         Description=Serve goose documentation for the goose-doc-guide skill\n\
+         Documentation=https://goose-docs.ai/docs/guides/offline-docs\n\
+         Wants=network-online.target\n\
+         After=network-online.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={exec}\n\
+         Restart=on-failure\n\
+         RestartSec=3\n\
+         WorkingDirectory={docs_dir}\n\
+         \n\
+         [Install]\n\
+         WantedBy={wanted_by}\n",
+        exec = inputs.command_line,
+        docs_dir = inputs.docs_dir,
+        wanted_by = if inputs.system {
+            "multi-user.target"
+        } else {
+            "default.target"
+        },
+    );
+
+    ServicePlan {
+        kind,
+        location,
+        contents,
+        command_line: inputs.command_line.to_string(),
+    }
+}
+
+fn launchd_plan(inputs: &ServiceInputs<'_>) -> ServicePlan {
+    let location = inputs
+        .config_home
+        .join("LaunchAgents")
+        .join(format!("com.goose-doc.{}.plist", inputs.hostname));
+
+    let mut program_args = String::new();
+    for arg in std::iter::once(inputs.bin).chain(inputs.args.iter().copied()) {
+        program_args.push_str(&format!("    <string>{}</string>\n", escape_xml(arg)));
+    }
+
+    let contents = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n\
+         <key>Label</key>\n\
+         <string>com.goose-doc.{hostname}</string>\n\
+         <key>ProgramArguments</key>\n\
+         <array>\n\
+         {program_args}\
+         </array>\n\
+         <key>RunAtLoad</key>\n\
+         <true/>\n\
+         <key>KeepAlive</key>\n\
+         <true/>\n\
+         <key>StandardOutPath</key>\n\
+         <string>{stdout}</string>\n\
+         <key>StandardErrorPath</key>\n\
+         <string>{stderr}</string>\n\
+         </dict>\n\
+         </plist>\n",
+        hostname = escape_xml(inputs.hostname),
+        stdout = escape_xml(&inputs.log_dir.join("service.log").to_string_lossy()),
+        stderr = escape_xml(&inputs.log_dir.join("service.err.log").to_string_lossy()),
+    );
+
+    ServicePlan {
+        kind: ServiceKind::Launchd,
+        location,
+        contents,
+        command_line: inputs.command_line.to_string(),
+    }
+}
+
+fn windows_plan(inputs: &ServiceInputs<'_>) -> ServicePlan {
+    // `sc.exe` needs the executable and arguments quoted separately, and the
+    // argument list must keep its quotes or a path with spaces breaks.
+    let quoted_args = inputs
+        .args
+        .iter()
+        .map(|arg| quote_windows(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bin = quote_windows(inputs.bin);
+
+    let contents = format!(
+        "sc.exe create {SERVICE_NAME} binPath= \"\\\"{bin}\\\" {quoted_args}\" start= auto\n\
+         sc.exe failure {SERVICE_NAME} reset= 86400 actions= restart/3000/restart/3000/restart/3000\n"
+    );
+
+    ServicePlan {
+        kind: ServiceKind::Windows,
+        location: PathBuf::from(format!(
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\{SERVICE_NAME}"
+        )),
+        contents,
+        command_line: inputs.command_line.to_string(),
     }
 }
 
@@ -356,7 +422,6 @@ fn run_shell(command_line: &str) -> Result<String> {
     }
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -364,7 +429,6 @@ fn config_home() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -373,10 +437,18 @@ fn hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
-#[cfg(target_os = "linux")]
-fn is_root() -> bool {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc_geteuid() == 0 }
+/// True when the service should be registered system-wide. Only Linux has two
+/// scopes; elsewhere this is always false.
+fn is_system_scope() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc_geteuid() == 0 }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -385,9 +457,8 @@ extern "C" {
     fn libc_geteuid() -> u32;
 }
 
-/// Escape XML text content. Only the macOS plist needs it, but keeping one
-/// definition avoids a platform-specific dead-code warning.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Escape XML text content. Only the macOS plist needs it, but the whole set of
+/// renderers is compiled on every platform so each can be tested anywhere.
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -395,7 +466,6 @@ fn escape_xml(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-#[cfg(target_os = "windows")]
 fn quote_windows(value: &str) -> String {
     if value.contains(' ') {
         format!("\"{value}\"")
@@ -530,63 +600,120 @@ mod tests {
         assert!(preview.contains("would remove"), "got: {preview}");
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn systemd_unit_is_a_valid_unit_with_restart() {
-        let plan = plan(
-            &test_settings(),
-            Path::new("/opt/goose-docs"),
-            &test_bin(),
-            10650,
-        )
-        .expect("plan");
+    /// Inputs that stand in for the platform the binary happens to run on, so
+    /// all three definitions are exercised on every platform.
+    static ARGS: [&str; 7] = [
+        "--headless",
+        "--docs-dir",
+        "/opt/goose-docs",
+        "--port",
+        "10650",
+        "--bind",
+        "0.0.0.0",
+    ];
 
-        assert!(plan.contents.contains("[Unit]"));
-        assert!(plan.contents.contains("[Service]"));
-        assert!(plan.contents.contains("[Install]"));
-        assert!(plan.contents.contains("Restart=on-failure"));
-        assert!(plan
-            .contents
-            .contains("ExecStart=/opt/goose-doc/goose-doc --headless"));
-        // The unit path follows the scope: system units live in /etc.
-        match plan.kind {
-            ServiceKind::SystemdSystem => {
-                assert_eq!(
-                    plan.location,
-                    PathBuf::from("/etc/systemd/system/goose-doc.service")
-                )
-            }
-            ServiceKind::SystemdUser => assert!(plan.location.ends_with("goose-doc.service")),
-            other => panic!("unexpected kind {other:?}"),
+    fn inputs() -> ServiceInputs<'static> {
+        ServiceInputs {
+            bin: "/opt/goose-doc/goose-doc",
+            docs_dir: "/opt/goose-docs",
+            args: &ARGS,
+            command_line: "/opt/goose-doc/goose-doc --headless --docs-dir /opt/goose-docs --port 10650 --bind 0.0.0.0",
+            system: false,
+            hostname: "host1",
+            config_home: PathBuf::from("/home/u/.config"),
+            log_dir: PathBuf::from("/home/u/.cache/goose-doc"),
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[test]
+    fn systemd_unit_is_valid_and_restarts_on_failure() {
+        let plan = systemd_plan(&inputs());
+
+        for section in ["[Unit]", "[Service]", "[Install]"] {
+            assert!(plan.contents.contains(section), "missing {section}");
+        }
+        assert!(plan.contents.contains("Restart=on-failure"));
+        assert!(plan.contents.contains("ExecStart="));
+        assert!(plan.contents.contains("WantedBy=default.target"));
+        assert_eq!(plan.kind, ServiceKind::SystemdUser);
+        assert!(plan.location.ends_with("systemd/user/goose-doc.service"));
+    }
+
+    #[test]
+    fn systemd_system_scope_uses_etc_and_multi_user() {
+        let inputs = ServiceInputs {
+            system: true,
+            ..inputs()
+        };
+        let plan = systemd_plan(&inputs);
+
+        assert_eq!(plan.kind, ServiceKind::SystemdSystem);
+        assert_eq!(
+            plan.location,
+            PathBuf::from("/etc/systemd/system/goose-doc.service")
+        );
+        assert!(plan.contents.contains("WantedBy=multi-user.target"));
+    }
+
     #[test]
     fn launchd_plist_has_the_expected_keys() {
-        let plan = plan(
-            &test_settings(),
-            Path::new("/opt/goose-docs"),
-            &test_bin(),
-            10650,
-        )
-        .expect("plan");
+        let plan = launchd_plan(&inputs());
 
         for key in [
             "<key>Label</key>",
             "<key>ProgramArguments</key>",
             "<key>RunAtLoad</key>",
             "<key>KeepAlive</key>",
+            "<key>StandardErrorPath</key>",
         ] {
             assert!(plan.contents.contains(key), "missing {key}");
         }
-        assert!(plan.contents.contains("--headless"));
-        assert!(plan.location.extension().is_some_and(|e| e == "plist"));
+        assert!(plan.contents.contains("com.goose-doc.host1"));
+        assert!(plan.location.ends_with("com.goose-doc.host1.plist"));
+        assert_eq!(plan.kind, ServiceKind::Launchd);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn xml_is_escaped() {
-        assert_eq!(escape_xml("a&b<c>"), "a&amp;b&lt;c&gt;");
+    fn launchd_plist_escapes_paths() {
+        let plan = launchd_plan(&ServiceInputs {
+            hostname: "a&b",
+            ..inputs()
+        });
+        assert!(plan.contents.contains("a&amp;b"));
+        assert!(!plan.contents.contains("a&b<"));
+    }
+
+    #[test]
+    fn windows_service_quotes_the_binary_and_args() {
+        let inputs = ServiceInputs {
+            bin: r"C:\Program Files\goose-doc\goose-doc.exe",
+            ..inputs()
+        };
+        let plan = windows_plan(&inputs);
+
+        assert!(plan.contents.contains("sc.exe create goose-doc"));
+        assert!(plan.contents.contains("start= auto"));
+        assert!(plan.contents.contains("sc.exe failure goose-doc"));
+        // A path with a space must stay quoted or the service fails to start.
+        assert!(plan
+            .contents
+            .contains("\"C:\\Program Files\\goose-doc\\goose-doc.exe\""));
+        assert!(plan
+            .location
+            .to_string_lossy()
+            .contains("CurrentControlSet"));
+        assert_eq!(plan.kind, ServiceKind::Windows);
+    }
+
+    #[test]
+    fn quote_windows_leaves_simple_args_alone() {
+        assert_eq!(quote_windows("--headless"), "--headless");
+        assert_eq!(quote_windows("/opt/a b"), "\"/opt/a b\"");
+    }
+
+    #[test]
+    fn escape_xml_escapes_the_three_special_characters() {
+        assert_eq!(escape_xml("a&b<c>d"), "a&amp;b&lt;c&gt;d");
+        assert_eq!(escape_xml("plain"), "plain");
     }
 }
