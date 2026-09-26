@@ -551,7 +551,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | **P1** 번들 파이프라인 | `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `docs-bundle.yml` | **✅ 완료** — v1.52.0으로 번들 생성(344.4MB, 맵 61항목), manifest 발행, 추출 경로에서 `GOOSE_DOCS_ROOT` 지정 시 스킬이 오프라인으로 문서 읽음(검증 통과) | 완료 |
 | **P2** 코어 + 헤드리스 서버 | `src/{main,cli,config,docs,server}.rs`, `tests/serve_test.rs`, `fixtures/docs-root/`, `tools/smoke-test.sh` | **✅ 완료** — 테스트 37개 통과, fmt/clippy clean. 실제 번들(61페이지) 서빙·`GOOSE_DOCS_ROOT=http://…`로 스킬 동작·404/경로이탈/원격바인드/포트해제 검증 | 완료 |
 | **P3** 패널 UI (egui) | `panel/mod.rs`, `panel/app.rs`, `config.rs`, `fonts.rs` | 3개 OS에서 더블클릭 → 창 → 설정 → 시작/중지/상태/URL 복사 동작. Linux는 `xvfb-run --smoke-gui` 통과 | 2~3일 |
-| **P4** 크로스 OS CI | `build-app.yml`, `release.yml`, `smoke-test.sh` | **✅ 구현 완료** — actionlint/shellcheck 통과, macOS·Linux(Ubuntu 컨테이너)에서 빌드·테스트·스모크 실측 통과. **GitHub Actions 실제 실행은 미검증**(원격 저장소 없음, §10.3) | 완료(실행 대기) |
+| **P4** 크로스 OS CI | `build-app.yml`, `release.yml`, `smoke-test.sh` | **✅ 완료** — `soolmuk/goose-doc`에서 **3개 플랫폼(x86_64 linux/win, macos arm64) green**. 각 플랫폼에서 빌드·테스트 71개·스모크 테스트 실측 통과, 아티팩트 3종 업로드 | 완료 |
 | **P5** 릴리스/서비스 | `release.yml`, service 모듈, README/AGENTS | 3 OS 자산 업로드, systemd/launchd/Windows 서비스 등록·해제 동작 | 1~2일 |
 | **P6** 선택 | Basic 인증, 검색 | 필요 시 | — |
 
@@ -598,7 +598,7 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 
 - **2026-09-26**: P0 확정(포트 10650, 번들 `site` 단일, 릴리즈 자산 배포, cron 1일 6회, macOS aarch64만, 영어 UI). 패널 방식을 egui 네이티브 창으로 확정하고 관련 절(§1, §3.1, §5.1, §5.3, §5.6~5.9, §6, §9, §11) 갱신.
 - **2026-09-26 (P1 완료)**: `tools/build-docs-bundle.sh`, `tools/verify-docs-root.sh`, `.github/workflows/docs-bundle.yml`, `README.md` 작성. v1.52.0 실측으로 사실 F15~F21 추가, §4.1/§4.1.1/§4.1.2 갱신, 신규 리스크 G1~G3 등록. **site 번들이 344MB(스킬 필수분 1.8MB)임을 확인** — 대안 크기 측정치를 §4.1.2에 기록.
-- **2026-09-26 (P4 구현 완료)**: `build-app.yml`(3 OS 매트릭스), `release.yml` 추가, `tools/smoke-test.sh`를 Windows Git Bash 대응으로 재작성(disown, seq 제거, curl/체크섬 폴백). `actionlint`(shellcheck 포함) 3개 워크플로 0 errors, `shellcheck -S warning` 0 issues. **macOS와 Ubuntu 24.04 컨테이너에서 빌드·테스트 71개·스모크 테스트 실측 통과.** Windows 및 GitHub Actions 실제 실행은 미검증(§10.3).
+- **2026-09-26 (P4 완료)**: `build-app.yml`(3 OS 매트릭스), `release.yml` 추가, `tools/smoke-test.sh`를 Windows Git Bash 대응으로 재작성(disown, seq 제거, curl/체크섬 폴백). 비공개 저장소 **`soolmuk/goose-doc`** 생성 후 CI 3회 실행 → **3개 플랫폼 green**(run 36206440329), 아티팩트 3종. CI가 로컬에서 놓친 결함 **2건(D1 fmt, D2 아티팩트 입력)** 을 잡아냄 → §10.3. CI가 빌드한 Linux 바이너리로 실제 344MB 번들 서빙 확인.
 - **2026-09-26 (P3 완료)**: `panel/mod.rs`(GUI 비의존 상태 모델), `panel/app.rs`(eframe), `settings.rs`(영속화), `addr.rs` 추가. **실제 macOS GUI 창을 띄워 Start/Stop/창닫기를 클릭으로 검증**(스크린샷). eframe 0.36 API 변경(`App::ui`, `egui::Panel::top`)을 소스에서 확인해 반영. `--smoke-gui`는 도입하지 않음(xvfb 불필요).
 - **2026-09-26 (P2 완료)**: Rust 크레이트 구현(`src/`, 약 1,300줄, 테스트 37개), `fixtures/docs-root/`, `tools/smoke-test.sh`, `tests/serve_test.rs` 추가. **HTTP 관리 API를 두지 않는 것으로 결정**(패널이 프로세스 내에서 직접 제어) → §5.4 갱신. `--docs-dir`/`--docs-version`/`fetch`/`doctor` 구현. G1은 사용자 결정으로 **그대로 유지**.
 
@@ -619,16 +619,25 @@ export GOOSE_DOCS_ROOT=/opt/goose-docs
 | `shellcheck -S warning` `tools/*.sh` | ✅ 0 issues |
 | **macOS**: 빌드 + 테스트 71개 + 스모크 테스트 | ✅ 실측 통과 |
 | **Linux(Ubuntu 24.04 컨테이너)**: 빌드 + 테스트 71개 + 스모크 테스트 + 디스플레이 없을 때 폴백 | ✅ 실측 통과 |
-| **Windows**: 빌드/실행 | ❌ **미검증** (Wine 없음, Windows 러너 필요) |
-| **GitHub Actions 실제 실행** | ❌ **미검증** — 원격 저장소가 없어 워크플로를 돌릴 수 없다 |
+| **Windows**: 빌드 + 테스트 + 스모크 테스트 | ✅ **실측 통과** (GitHub Actions, Git Bash) |
+| **GitHub Actions 실제 실행** | ✅ **3개 플랫폼 green** (`soolmuk/goose-doc` run 36206440329) |
+| CI 산출물 3종 아티팩트 업로드 + 체크섬 검증 | ✅ linux-x86_64 / macos-arm64 / windows-x86_64 |
+| CI가 빌드한 Linux 바이너리로 **실제 344MB 번들 서빙** | ✅ map/index/CSS 모두 200 |
 
-`actionlint`는 문법·표현식·액션 입력을 검사하지만 **실행 결과를 보장하지 않는다.** 특히 다음은 실제 러너에서만 확인된다.
-- Windows에서의 빌드(eframe는 Windows에서 특별한 시스템 패키지가 필요 없다고 알려져 있으나 확인 필요)
-- Git Bash에서의 `smoke-test.sh` 동작
-- `Swatinem/rust-cache`, `upload-artifact` 조합
-- 러너의 기본 `curl`/`sha256` 도구 유무
+`actionlint`는 문법·표현식·액션 입력을 검사하지만 실행 결과를 보장하지 않는다. 실제 러너에서 아래가 확인되었고, **CI가 로컬 검증에서 놓친 결함 2건을 잡아냈다.**
 
-**다음 단계**: 원격 저장소를 만든 뒤 `build-app.yml`을 `workflow_dispatch`로 1회 실행해 3개 플랫폼 green을 확인한다. 이때 Windows 관련 문제가 나오면 그때 수정한다(추정으로 미리 고치지 않는다).
+### CI가 잡아낸 결함 (로컬 검증 누락)
+
+**D1. `cargo fmt --check` 실패 (3개 플랫폼 전부)**
+- `src/cli.rs`의 `DEFAULT_FETCH_BASE_URL` 상수를 fmt 적용 후 커밋했다. 로컬에서 fmt를 돌린 **뒤에** 수정해 재확인을 빠뜨렸다.
+- 교훈: 커밋 전 `cargo fmt --check`를 **마지막** 단계로 둔다.
+
+**D2. `upload_artifacts` 입력이 `workflow_dispatch`에 선언되지 않아 아티팩트가 업로드되지 않음**
+- `workflow_call`에만 선언된 입력은 dispatch 실행 시 **빈 문자열**이 되고, `if: inputs.upload_artifacts != false`는 빈 문자열을 `false`와 같다고 보지 않아 조건이 거짓이 됐다.
+- 아티팩트 목록이 비어 있는 것을 보고 발견했다.
+- 수정: 입력을 양쪽 트리거에 선언하고 조건을 `inputs.upload_artifacts == true || inputs.upload_artifacts == ''`로 명시.
+
+**다음 단계**: Windows/macOS 문제는 실제로 발생하지 않았다(3개 플랫폼 green).
 
 ---
 
