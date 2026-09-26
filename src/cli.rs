@@ -6,8 +6,7 @@ use crate::config::DEFAULT_PORT;
 
 /// Where `goose-doc fetch` looks for bundles. Override with --base-url when
 /// bundles are mirrored elsewhere.
-pub const DEFAULT_FETCH_BASE_URL: &str =
-    "https://github.com/soolmuk/goose-doc/releases/download";
+pub const DEFAULT_FETCH_BASE_URL: &str = "https://github.com/soolmuk/goose-doc/releases/download";
 
 #[derive(Parser, Debug)]
 #[command(
