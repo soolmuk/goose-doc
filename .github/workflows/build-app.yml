@@ -8,6 +8,12 @@ name: Build App
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_artifacts:
+        description: "Upload the built binaries as workflow artifacts"
+        required: false
+        default: true
+        type: boolean
   workflow_call:
     inputs:
       upload_artifacts:
@@ -129,8 +135,11 @@ jobs:
           (cd dist && checksum "$ASSET" > "$ASSET.sha256")
           ls -la dist
 
+      # The input is declared for both dispatch and call so the default
+      # applies either way. Treat anything that is not an explicit false as
+      # "upload", since an undeclared input arrives as an empty string.
       - name: Upload artifact
-        if: ${{ inputs.upload_artifacts != false }}
+        if: ${{ inputs.upload_artifacts == true || inputs.upload_artifacts == '' }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: goose-doc-${{ matrix.name }}
