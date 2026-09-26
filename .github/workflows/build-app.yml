@@ -95,8 +95,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BUNDLE="$(find bundle -name 'goose-docs-*.tar.gz' -type f | head -1)"
-          test -n "$BUNDLE" || { echo "no bundle found in ./bundle" >&2; exit 1; }
+          # Always embed the lean bundle. The artifact also contains the full
+          # site bundle (~344 MB), and picking with `find | head -1` selected
+          # whichever the filesystem happened to list first, which differed per
+          # platform and produced 330 MB binaries.
+          BUNDLE="$(find bundle -name 'goose-docs-*-lean.tar.gz' -type f | head -1)"
+          test -n "$BUNDLE" || { echo "no lean bundle found in ./bundle" >&2; exit 1; }
+          echo "embedding $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
           ./tools/embed-docs.sh "$BUNDLE"
 
       - name: Format check
@@ -133,6 +138,22 @@ jobs:
             || { echo "expected a headless fallback"; exit 1; }
           echo "$out" | grep -qi "panel" \
             || { echo "expected a note about the panel"; exit 1; }
+
+      # The docs are embedded, so a runaway binary means something larger than
+      # the lean bundle got baked in. Fail loudly instead of shipping 300 MB.
+      - name: Check binary size
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/goose-doc"
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          SIZE=$(wc -c < "$BIN" | tr -d ' ')
+          LIMIT=$((64 * 1024 * 1024))
+          echo "$BIN is $((SIZE / 1048576)) MB"
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "Error: binary exceeds $((LIMIT / 1048576)) MB; was the full site bundle embedded?" >&2
+            exit 1
+          fi
 
       - name: Package binary
         shell: bash

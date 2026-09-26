@@ -135,6 +135,25 @@ mod tests {
         assert!(entries() > 0, "embedded bundle reports no pages");
     }
 
+    /// The binary must stay small, so the embedded docs must stay small. This
+    /// catches accidentally embedding the full site bundle (hundreds of
+    /// megabytes of blog media) instead of the lean one.
+    #[test]
+    fn embedded_docs_stay_small() {
+        let total: usize = paths()
+            .iter()
+            .filter_map(|path| get(path))
+            .map(<[u8]>::len)
+            .sum();
+
+        assert!(
+            total < 4 * 1024 * 1024,
+            "embedded docs are {total} bytes, which means the full site bundle \
+             was embedded instead of the lean one; check that embed-docs.sh was \
+             given a *-lean.tar.gz"
+        );
+    }
+
     #[test]
     fn paths_include_the_map_and_pages() {
         let paths = paths();

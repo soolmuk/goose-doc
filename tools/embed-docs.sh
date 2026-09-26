@@ -26,6 +26,16 @@ if [ ! -f "$BUNDLE" ]; then
   exit 1
 fi
 
+# Refuse the full site bundle. It carries blog images and videos that the skill
+# never reads, and embedding it would produce a multi-hundred-megabyte binary.
+MAX_BYTES=$((32 * 1024 * 1024))
+SIZE=$(wc -c < "$BUNDLE" | tr -d ' ')
+if [ "$SIZE" -gt "$MAX_BYTES" ]; then
+  echo "Error: $BUNDLE is $((SIZE / 1048576)) MB." >&2
+  echo "       Only the lean bundle belongs in the binary (see build-lean-bundle.sh)." >&2
+  exit 1
+fi
+
 if [ -z "$VERSION" ]; then
   VERSION="$(basename "$BUNDLE" | sed -n 's/^goose-docs-\(.*\)\.tar\.gz$/\1/p' | sed 's/-lean$//')"
 fi
